@@ -17,6 +17,9 @@ if root is None and cwd.is_dir():
     (root / "config.md").write_text("# Workspace Wiki\n")
     (root / "_index.md").write_text("# Workspace Wiki\n\n## Knowledge\n\n- [Raw](raw/)\n- [Articles](wiki/)\n- [Output](output/)\n")
 if root:
+    marker = root / ".wiki-agent-system.json"
+    if not marker.exists():
+        marker.write_text('{"schema_version":1}\n')
     event = payload.get("hook_event_name", "SessionStart")
     if event == "Stop":
         captures = root / "inbox" / "autosave"
