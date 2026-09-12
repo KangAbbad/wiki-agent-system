@@ -1,0 +1,12 @@
+{
+  "name": "team-wiki",
+  "interface": { "displayName": "Team Wiki" },
+  "plugins": [
+    {
+      "name": "wiki-preflight",
+      "source": { "source": "local", "path": "./plugins/wiki-preflight" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}
