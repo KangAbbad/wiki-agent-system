@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json, sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
@@ -12,5 +13,13 @@ if root is None and cwd.is_dir():
     (root / "config.md").write_text("# Workspace Wiki\n")
     (root / "_index.md").write_text("# Workspace Wiki\n\n## Knowledge\n\n- [Raw](raw/)\n- [Articles](wiki/)\n- [Output](output/)\n")
 if root:
+    event = payload.get("hook_event_name", "SessionStart")
+    if event == "Stop":
+        captures = root / "inbox" / "autosave"
+        captures.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        (captures / f"{stamp}-session.md").write_text(
+            f"---\ntype: autosave-capture\nstatus: pending-curation\nworkspace: {cwd}\n---\n\n# Session capture\n\nSession completed. Review changed workspace artifacts during curation.\n"
+        )
     text = f"Workspace knowledge preflight: read {root / '_index.md'} and relevant recent captures/articles before working."
     print(json.dumps({"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name", "SessionStart"), "additionalContext": text}}))
