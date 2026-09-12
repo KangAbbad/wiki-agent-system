@@ -36,6 +36,22 @@ Run `scripts/wiki_ambient.py resolve --cwd "$PWD"` before a wiki operation. Pref
 
 After a meaningful completed task, classify scope from the outcome; never require a save command. A workspace-backed task is workspace-scope even when empty and without Git. Preferences, cross-repo research, ideas, and projectless work are user-scope. Include outcome, durable decision, verification, and workspace-relative artifact paths. Do not capture trivial replies, raw conversation, tool output, or secrets.
 
+### Required semantic finalizer
+
+Before sending the final response for meaningful workspace work, execute the
+bundled `capture` command. Meaningful work means an implementation,
+investigation, research, plan, decision, verification, or changed artifact:
+
+```sh
+python3 "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture --cwd "$PWD" \
+  --outcome "<what was completed>" --kind result --confidence unverified
+```
+
+Add each applicable `--decision`, `--artifact`, `--verification`, `--source`,
+and `--open-question`. This is mandatory agent behavior, not a suggestion to
+the user. The Stop hook is only a crash/session fallback: it cannot read the
+model's final response, so it cannot create a semantic summary.
+
 Captures route to the resolved topic's `inbox/autosave/`; unresolved work routes to the hub's operational `.sessions/autosave/` until a topic exists. Capture is preservation, not evidence. Auto-canonicalize only a supplied, attributable source; otherwise leave the capture pending curation.
 
 Canonical evidence requires source content, an absolute HTTP(S) provenance URL,
