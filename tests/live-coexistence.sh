@@ -7,12 +7,12 @@ trap 'rm -rf "$root"' EXIT
 mkdir -p "$root/codex" "$root/home" "$root/workspace"
 
 export HOME="$root/home" CODEX_HOME="$root/codex"
-codex plugin marketplace add "${WIKI_MARKETPLACE_SOURCE:-KangAbbad/wiki-agent-system}" --ref "${WIKI_MARKETPLACE_REF:-main}" --json >"$root/team-marketplace.json"
-codex plugin add wiki-preflight@team-wiki --json >"$root/team-install.json"
+codex plugin marketplace add "${WIKI_MARKETPLACE_SOURCE:-KangAbbad/wiki-agent-system}" --ref "${WIKI_MARKETPLACE_REF:-main}" --json >"$root/wiki-agent-system-marketplace.json"
+codex plugin add wiki-preflight@wiki-agent-system --json >"$root/wiki-agent-system-install.json"
 codex plugin marketplace add "${LLM_WIKI_MARKETPLACE_SOURCE:-nvk/llm-wiki}" --ref "${LLM_WIKI_MARKETPLACE_REF:-master}" --json >"$root/upstream-marketplace.json"
 codex plugin add wiki@llm-wiki --json >"$root/upstream-install.json"
 
-preflight=$(find "$CODEX_HOME/plugins/cache/team-wiki/wiki-preflight" -path '*/hooks/preflight.py' -type f | head -n 1)
+preflight=$(find "$CODEX_HOME/plugins/cache/wiki-agent-system/wiki-preflight" -path '*/hooks/preflight.py' -type f | head -n 1)
 upstream=$(find "$CODEX_HOME/plugins/cache/llm-wiki/wiki" -path '*/hooks/llm_wiki_session.py' -type f | head -n 1)
 test -n "$preflight" || fail "wiki-preflight hook missing after Git installation"
 test -n "$upstream" || fail "wiki@llm-wiki hook missing after Git installation"

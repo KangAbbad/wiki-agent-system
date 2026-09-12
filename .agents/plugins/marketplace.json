@@ -1,6 +1,6 @@
 {
-  "name": "team-wiki",
-  "interface": { "displayName": "Team Wiki" },
+  "name": "wiki-agent-system",
+  "interface": { "displayName": "Wiki Agent System" },
   "plugins": [
     {
       "name": "wiki-preflight",

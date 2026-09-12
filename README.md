@@ -10,7 +10,7 @@ personal `~/.codex/skills/wiki-ambient` installation.
 
 ```bash
 codex plugin marketplace add KangAbbad/wiki-agent-system --ref main
-codex plugin add wiki-preflight@team-wiki
+codex plugin add wiki-preflight@wiki-agent-system
 ```
 
 Commit `.wiki/` with repository knowledge. Keep `.wiki/.sessions/` untracked.

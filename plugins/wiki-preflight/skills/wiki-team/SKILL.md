@@ -3,7 +3,7 @@ name: wiki-team
 description: Route repository work through its local LLM Wiki with automatic preflight, capture, and knowledge-aware document placement.
 ---
 
-# Team Wiki Runtime
+# Wiki Agent System Runtime
 
 Use the global LLM Wiki without requiring `@wiki`.
 Mutable workspace-topic mappings are user-scope state in
