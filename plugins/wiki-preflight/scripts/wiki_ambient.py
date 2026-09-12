@@ -24,8 +24,9 @@ SENSITIVE = re.compile(
 
 
 def load():
+    user_config_exists = USER_CONFIG.exists()
     try:
-        data = json.loads(USER_CONFIG.read_text() if USER_CONFIG.exists() else CONFIG_TEMPLATE.read_text())
+        data = json.loads(USER_CONFIG.read_text() if user_config_exists else CONFIG_TEMPLATE.read_text())
     except FileNotFoundError:
         raise SystemExit(f"missing config template: {CONFIG_TEMPLATE}")
     except json.JSONDecodeError as error:
@@ -36,6 +37,10 @@ def load():
             topics.setdefault(topic, {"workspace_roots": [], "aliases": []})["workspace_roots"].append(workspace)
         data["schema_version"] = 2
         data["topics"] = topics
+    migrated = False
+    if isinstance(data.get("retention"), dict) and "max_bytes" not in data["retention"]:
+        data["retention"]["max_bytes"] = 1073741824
+        migrated = True
     if data.get("schema_version") != 2 or not isinstance(data.get("workspace_topics"), dict) or not isinstance(data.get("topics"), dict):
         raise SystemExit("invalid ambient config schema")
     capture = data.get("capture")
@@ -48,6 +53,15 @@ def load():
         or capture.get("redact_sensitive") is not True
     ):
         raise SystemExit("invalid capture config schema")
+    retention = data.get("retention")
+    if (
+        not isinstance(retention, dict)
+        or not isinstance(retention.get("max_bytes"), int)
+        or retention["max_bytes"] <= 0
+        or any(not isinstance(retention.get(name), int) or not 0 < retention[name] <= 100 for name in ("warn_percent", "plan_percent", "block_large_write_percent"))
+        or not retention["warn_percent"] < retention["plan_percent"] < retention["block_large_write_percent"]
+    ):
+        raise SystemExit("invalid retention quota schema")
     for workspace, topic in data["workspace_topics"].items():
         if not Path(workspace).is_absolute() or not isinstance(topic, str) or not SLUG.fullmatch(topic):
             raise SystemExit("workspace_topics must map absolute paths to lowercase topic slugs")
@@ -58,7 +72,7 @@ def load():
         aliases = metadata.get("aliases", [])
         if not isinstance(roots, list) or not isinstance(aliases, list) or any(not Path(root).is_absolute() for root in roots) or any(not isinstance(alias, str) or not SLUG.fullmatch(alias) for alias in aliases):
             raise SystemExit("invalid topic metadata")
-    if not USER_CONFIG.exists():
+    if not user_config_exists or migrated:
         save(data)
     return data
 
@@ -150,6 +164,34 @@ def highest_confidence(previous: str, current: str) -> str:
     return max((previous, current), key=lambda value: levels.get(value, 0))
 
 
+def directory_bytes(root: Path) -> int:
+    total = 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file() and not path.is_symlink():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def quota_status(data: dict, root: Path, projected_bytes=None) -> dict:
+    retention = data["retention"]
+    used = directory_bytes(root)
+    projected = used if projected_bytes is None else projected_bytes
+    max_bytes = retention["max_bytes"]
+    percent = projected * 100 / max_bytes
+    if percent >= retention["block_large_write_percent"]:
+        level = "block"
+    elif percent >= retention["plan_percent"]:
+        level = "plan"
+    elif percent >= retention["warn_percent"]:
+        level = "warn"
+    else:
+        level = "normal"
+    return {"level": level, "used_bytes": used, "projected_bytes": projected, "max_bytes": max_bytes, "percent": round(percent, 2)}
+
+
 def capture(
     cwd: str,
     outcome: str,
@@ -226,8 +268,15 @@ confidence: {confidence}
 
 {lines(open_questions)}
 """
+    quota = None
+    if route["local_wiki"] and route["local_wiki_status"] == "valid":
+        existing_bytes = output.stat().st_size if output.exists() else 0
+        projected = directory_bytes(Path(route["local_wiki"])) - existing_bytes + len(content.encode("utf-8"))
+        quota = quota_status(data, Path(route["local_wiki"]), projected)
+        if quota["level"] == "block" and len(content.encode("utf-8")) > 256 * 1024:
+            raise SystemExit("workspace wiki quota blocks this large capture; run retention report and quarantine expired operational data")
     atomic_write(output, content)
-    print(json.dumps({"path": str(output), "topic": route["topic"], "status": "updated" if previous else "pending-curation"}))
+    print(json.dumps({"path": str(output), "topic": route["topic"], "status": "updated" if previous else "pending-curation", "quota": quota}))
 
 
 def source_slug(value: str) -> str:

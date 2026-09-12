@@ -4,6 +4,8 @@ for explicit product/developer documentation. Capture session completion in
 `.wiki/inbox/autosave/`. Never modify a foreign/incomplete `.wiki/`.
 Mutable Wiki Agent System configuration lives in
 `~/.config/llm-wiki/wiki-agent-system.json`, never in the versioned plugin cache.
+Measure quota against the local `.wiki/`; quarantine expired operational files
+only. Never auto-delete or quarantine canonical `raw/`, `wiki/`, or `output/`.
 
 ## Semantic finalizer
 

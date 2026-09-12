@@ -25,6 +25,7 @@
     "signals": ["workspace_changes", "verification", "bug_investigation", "architecture", "api_contract", "schema", "dependency", "deployment"]
   },
   "retention": {
+    "max_bytes": 1073741824,
     "queue_days": 30,
     "state_days": 30,
     "autosave_days": 90,

@@ -45,3 +45,9 @@ On first use, the plugin writes its mutable configuration and workspace-topic
 mapping to `~/.config/llm-wiki/wiki-agent-system.json` (or
 `$XDG_CONFIG_HOME/llm-wiki/wiki-agent-system.json`). Plugin updates never
 overwrite this file.
+
+## Storage control
+
+`retention.py <workspace>` reports `.wiki/` usage against the user-configured
+quota. `--apply` moves only expired autosaves and session state to `.wiki/.trash/`;
+it never deletes or moves canonical `raw/`, `wiki/`, or `output/`.
