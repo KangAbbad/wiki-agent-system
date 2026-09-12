@@ -1,9 +1,31 @@
 #!/usr/bin/env python3
-import hashlib, json, sys, os, re, tempfile, uuid
+import hashlib, json, sys, os, re, tempfile, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 SENSITIVE = re.compile(r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*", re.I)
+IGNORED_WORKSPACE_DIRS = {".git", ".wiki", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", ".next", ".cache"}
+
+def finalizer_state(root, payload):
+    session_id = str(payload.get("session_id") or "unknown")
+    turn_id = str(payload.get("turn_id") or "unknown")
+    key = hashlib.sha256(f"{session_id}:{turn_id}".encode()).hexdigest()[:16]
+    return root / ".sessions" / "wiki-agent-system" / "finalizers" / f"{key}.json"
+
+def workspace_changed_since(cwd, started_at):
+    """Bounded mtime scan; semantic capture remains the primary signal."""
+    deadline = time.monotonic() + 1.5
+    for base, directories, files in os.walk(cwd):
+        directories[:] = [name for name in directories if name not in IGNORED_WORKSPACE_DIRS]
+        for name in files:
+            try:
+                if (Path(base) / name).stat().st_mtime >= started_at:
+                    return True
+            except OSError:
+                continue
+            if time.monotonic() >= deadline:
+                return False
+    return False
 
 payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
 cwd = Path(payload.get("cwd") or payload.get("workspace_root") or ".").resolve()
@@ -23,33 +45,33 @@ if root:
     if not marker.exists():
         marker.write_text('{"schema_version":1}\n')
     event = payload.get("hook_event_name", "SessionStart")
+    if event == "UserPromptSubmit":
+        state = finalizer_state(root, payload)
+        state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=state.parent, prefix=".turn-", text=True)
+        with os.fdopen(fd, "w") as file:
+            json.dump({"started_at": time.time()}, file)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, state)
     if event == "Stop":
         captures = root / "inbox" / "autosave"
         captures.mkdir(parents=True, exist_ok=True)
         session_id = str(payload.get("session_id") or "unknown")
         turn_id = str(payload.get("turn_id") or "unknown")
-        key = hashlib.sha256(f"{session_id}:{turn_id}".encode()).hexdigest()[:16]
-        state = root / ".sessions" / "wiki-agent-system" / "finalizers" / f"{key}.md"
+        state = finalizer_state(root, payload)
         message = payload.get("last_assistant_message")
         message = SENSITIVE.sub(lambda match: f"{match.group(1)} [REDACTED]", message or "").strip()
-        if message and not payload.get("stop_hook_active"):
-            state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fd, temporary = tempfile.mkstemp(dir=state.parent, prefix=".finalizer-", text=True)
-            with os.fdopen(fd, "w") as file:
-                file.write(message)
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, state)
-            capture = Path(__file__).resolve().parents[1] / "scripts" / "wiki_ambient.py"
-            print(json.dumps({"decision": "block", "reason": f"Before completion, run `python3 {capture} capture --cwd {cwd} --outcome \"...\"` now. Summarize the completed outcome and add every applicable decision, artifact, verification, source, confidence, and open question. Do not ask the user to save it."}))
-            raise SystemExit(0)
-        previous = state.read_text() if state.exists() else message
-        semantic = [path for path in captures.glob("*.md") if path.stat().st_mtime >= state.stat().st_mtime] if state.exists() else []
-        if not semantic:
+        try:
+            started_at = json.loads(state.read_text()).get("started_at") if state.exists() else None
+        except (OSError, json.JSONDecodeError):
+            started_at = None
+        semantic = [path for path in captures.glob("*.md") if started_at and path.stat().st_mtime >= started_at]
+        if message and started_at and not semantic and workspace_changed_since(cwd, started_at):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             output = captures / f"{stamp}-{uuid.uuid4().hex[:8]}-semantic-fallback.md"
             fd, temporary = tempfile.mkstemp(dir=captures, prefix=".capture-", text=True)
             with os.fdopen(fd, "w") as file:
-                file.write(f"---\ntype: semantic-stop-capture\nstatus: pending-curation\nworkspace: {cwd}\nsession_id: {session_id}\nturn_id: {turn_id}\nfallback: true\n---\n\n# Auto-saved final result\n\n## Outcome\n\n{previous or 'Session completed; final response unavailable.'}\n\n## Decisions\n\n- Not extracted; review outcome during curation.\n\n## Artifacts\n\n- Not extracted; inspect workspace changes during curation.\n\n## Verification\n\n- Not extracted; review outcome during curation.\n")
+                file.write(f"---\ntype: semantic-stop-capture\nstatus: pending-curation\nworkspace: {cwd}\nsession_id: {session_id}\nturn_id: {turn_id}\nfallback: true\n---\n\n# Auto-saved final result\n\n## Outcome\n\n{message}\n\n## Decisions\n\n- Not extracted; review outcome during curation.\n\n## Artifacts\n\n- Not extracted; inspect workspace changes during curation.\n\n## Verification\n\n- Not extracted; review outcome during curation.\n")
             os.chmod(temporary, 0o600)
             os.replace(temporary, output)
         state.unlink(missing_ok=True)

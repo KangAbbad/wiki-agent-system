@@ -28,9 +28,14 @@ printf '%s\n' '# Research result' 'Use bounded retries for remote calls.' >"$wor
 run_hook UserPromptSubmit >"$test_root/research.json"
 grep -q 'bounded retries' "$test_root/research.json"
 
-# Stop fallback preserves uniqueness even inside one timestamp second.
-run_hook Stop >/dev/null
-run_hook Stop >/dev/null
+# Stop fallback is quiet, only follows a workspace change, and stays unique.
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"one"}' | python3 "$hook" >/dev/null
+printf 'one\n' >"$workspace/one.txt"
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"one","last_assistant_message":"Completed one"}' | python3 "$hook" >"$test_root/stop-one.json"
+! grep -q '"decision": "block"' "$test_root/stop-one.json"
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"two"}' | python3 "$hook" >/dev/null
+printf 'two\n' >"$workspace/two.txt"
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"two","last_assistant_message":"Completed two"}' | python3 "$hook" >/dev/null
 test "$(find "$workspace/.wiki/inbox/autosave" -name '*-semantic-fallback.md' | wc -l | tr -d ' ')" -eq 2
 
 # Docs routing is content policy, not a folder-name heuristic.
