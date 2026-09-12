@@ -21,5 +21,6 @@ if root:
         (captures / f"{stamp}-session.md").write_text(
             f"---\ntype: autosave-capture\nstatus: pending-curation\nworkspace: {cwd}\n---\n\n# Session capture\n\nSession completed. Review changed workspace artifacts during curation.\n"
         )
-    text = f"Workspace knowledge preflight: read {root / '_index.md'} and relevant recent captures/articles before working."
+    policy = (Path(__file__).resolve().parents[1] / "defaults" / "policy.md").read_text().strip()
+    text = f"{policy}\nWorkspace knowledge preflight: read {root / '_index.md'} and relevant recent captures/articles before working."
     print(json.dumps({"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name", "SessionStart"), "additionalContext": text}}))
