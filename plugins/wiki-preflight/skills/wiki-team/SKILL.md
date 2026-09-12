@@ -6,6 +6,8 @@ description: Route repository work through its local LLM Wiki with automatic pre
 # Team Wiki Runtime
 
 Use the global LLM Wiki without requiring `@wiki`.
+Mutable workspace-topic mappings are user-scope state in
+`~/.config/llm-wiki/wiki-agent-system.json`; plugin updates must never replace them.
 
 ## Route
 

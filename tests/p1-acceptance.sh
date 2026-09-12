@@ -76,6 +76,7 @@ from_root() (
 
 check 'plugin manifest' test -f "$root/plugins/wiki-preflight/.codex-plugin/plugin.json"
 check 'ambient configuration schema' python3 "$root/plugins/wiki-preflight/scripts/wiki_ambient.py" validate
+check 'user-scope configuration survives plugin replacement' sh "$root/tests/config-persistence.sh" "$root/plugins/wiki-preflight"
 check 'agent-side semantic finalizer contract' sh "$root/tests/semantic-finalizer.sh" "$root/plugins/wiki-preflight"
 check 'per-task semantic capture deduplication' sh "$root/tests/capture-dedup.sh" "$root/plugins/wiki-preflight"
 check 'semantic capture and evidence gate' semantic_and_evidence

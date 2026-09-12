@@ -2,6 +2,8 @@ Repository Wiki policy: read `.wiki/_index.md` before work. Store research,
 decisions, plans, reports, and knowledge artifacts in `.wiki/`; reserve `docs/`
 for explicit product/developer documentation. Capture session completion in
 `.wiki/inbox/autosave/`. Never modify a foreign/incomplete `.wiki/`.
+Mutable Wiki Agent System configuration lives in
+`~/.config/llm-wiki/wiki-agent-system.json`, never in the versioned plugin cache.
 
 ## Semantic finalizer
 

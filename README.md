@@ -38,3 +38,10 @@ python3 "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture \
 Outcome is required. Optional fields: decisions, workspace-relative artifacts,
 verification, attributable sources, confidence, and open questions.
 Credential-like values are replaced with `[REDACTED]`.
+
+## Device configuration
+
+On first use, the plugin writes its mutable configuration and workspace-topic
+mapping to `~/.config/llm-wiki/wiki-agent-system.json` (or
+`$XDG_CONFIG_HOME/llm-wiki/wiki-agent-system.json`). Plugin updates never
+overwrite this file.

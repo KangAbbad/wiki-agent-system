@@ -14,7 +14,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 
-CONFIG = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
+CONFIG_TEMPLATE = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
+USER_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-wiki" / "wiki-agent-system.json"
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SENSITIVE = re.compile(
     r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*",
@@ -24,9 +25,9 @@ SENSITIVE = re.compile(
 
 def load():
     try:
-        data = json.loads(CONFIG.read_text())
+        data = json.loads(USER_CONFIG.read_text() if USER_CONFIG.exists() else CONFIG_TEMPLATE.read_text())
     except FileNotFoundError:
-        raise SystemExit(f"missing config: {CONFIG}")
+        raise SystemExit(f"missing config template: {CONFIG_TEMPLATE}")
     except json.JSONDecodeError as error:
         raise SystemExit(f"invalid JSON in {CONFIG}: {error}")
     if data.get("schema_version") == 1:
@@ -57,17 +58,19 @@ def load():
         aliases = metadata.get("aliases", [])
         if not isinstance(roots, list) or not isinstance(aliases, list) or any(not Path(root).is_absolute() for root in roots) or any(not isinstance(alias, str) or not SLUG.fullmatch(alias) for alias in aliases):
             raise SystemExit("invalid topic metadata")
+    if not USER_CONFIG.exists():
+        save(data)
     return data
 
 
 def save(data):
-    CONFIG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=CONFIG.parent, delete=False) as file:
+    USER_CONFIG.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=USER_CONFIG.parent, delete=False) as file:
         json.dump(data, file, indent=2)
         file.write("\n")
         temporary = file.name
     os.chmod(temporary, 0o600)
-    os.replace(temporary, CONFIG)
+    os.replace(temporary, USER_CONFIG)
 
 
 def wiki_status(root):
