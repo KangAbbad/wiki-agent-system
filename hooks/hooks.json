@@ -1,0 +1,1 @@
+{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"python3 \"$PLUGIN_ROOT/hooks/preflight.py\"","timeout":5,"statusMessage":"Loading workspace knowledge"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"python3 \"$PLUGIN_ROOT/hooks/preflight.py\"","timeout":5,"statusMessage":"Loading workspace knowledge"}]}]}}
