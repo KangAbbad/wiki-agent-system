@@ -28,10 +28,5 @@
     "block_large_write_percent": 95
   },
   "workspace_topics": {},
-  "topics": {
-    "knowledge-test": {
-      "workspace_roots": [],
-      "aliases": []
-    }
-  }
+  "topics": {}
 }
