@@ -10,6 +10,8 @@ Mutable workspace-topic mappings are user-scope state in
 `~/.config/llm-wiki/wiki-agent-system.json`; plugin updates must never replace them.
 Schema migrations are additive and one-way. A newer unknown schema is never
 overwritten or downgraded.
+Hook runtime is provisioned under stable plugin data before execution so an
+active task remains functional when a later plugin update replaces its cache.
 
 ## Route
 

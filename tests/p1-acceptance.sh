@@ -86,6 +86,7 @@ check 'user-scope configuration migration' sh "$root/tests/config-migration.sh" 
 check 'agent-side semantic finalizer contract' sh "$root/tests/semantic-finalizer.sh" "$root/plugins/wiki-preflight"
 check 'per-task semantic capture deduplication' sh "$root/tests/capture-dedup.sh" "$root/plugins/wiki-preflight"
 check 'quota report and operational-data quarantine' sh "$root/tests/quota-retention.sh" "$root/plugins/wiki-preflight"
+check 'stable hook runtime survives removed plugin cache' sh "$root/tests/stable-hook-runtime.sh" "$root/plugins/wiki-preflight"
 check 'semantic capture and evidence gate' semantic_and_evidence
 check 'migration/version marker' migration_marker
 check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-preflight"

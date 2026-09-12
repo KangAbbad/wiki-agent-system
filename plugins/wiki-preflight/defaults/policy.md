@@ -8,6 +8,8 @@ Measure quota against the local `.wiki/`; quarantine expired operational files
 only. Never auto-delete or quarantine canonical `raw/`, `wiki/`, or `output/`.
 Workspace marker and user configuration migrate only forward. A marker or config
 with a newer schema is read-only until a compatible plugin version is installed.
+Plugin hooks execute from stable `PLUGIN_DATA` after provisioning; an active
+task survives removal of the versioned plugin cache during a later upgrade.
 
 ## Semantic finalizer
 

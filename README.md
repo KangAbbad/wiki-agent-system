@@ -50,6 +50,12 @@ Both this file and `.wiki/.wiki-agent-system.json` use forward-only schema
 migrations. A newer unknown schema is left untouched until a compatible plugin
 is installed.
 
+## Upgrade safety
+
+On task start, the hook provisions the installed runtime into stable plugin
+data. After a later update removes a versioned cache, existing tasks continue
+using that stable runtime; a new task provisions the newer runtime.
+
 ## Storage control
 
 `retention.py <workspace>` reports `.wiki/` usage against the user-configured
