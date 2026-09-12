@@ -1,6 +1,6 @@
 {
   "name": "wiki-preflight",
-  "version": "0.1.0+codex.20260913090000",
+  "version": "0.1.0+codex.20260913093000",
   "description": "Loads repository-scoped wiki knowledge before Codex work.",
   "author": {
     "name": "Local developer"
@@ -8,8 +8,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Wiki Preflight",
-    "shortDescription": "Load repository wiki knowledge first.",
-    "longDescription": "Injects repository-scoped LLM Wiki preflight context at session start.",
+    "shortDescription": "Automate repository and user-scope LLM Wiki work.",
+    "longDescription": "Injects repository wiki preflight context and ships ambient LLM Wiki policy for projectless work.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [],

@@ -2,6 +2,10 @@
 
 Repository-scoped knowledge preflight for Codex.
 
+The package also ships `wiki-preflight:wiki-ambient`: the global policy for
+projectless, user-scope knowledge work. Team devices do not need a separate
+personal `~/.codex/skills/wiki-ambient` installation.
+
 ## Install
 
 ```bash

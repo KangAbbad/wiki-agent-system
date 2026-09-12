@@ -43,6 +43,12 @@ policy="$test_root/plugin/defaults/policy.md"
 grep -q 'knowledge artifacts in `.wiki/`' "$policy"
 grep -q 'explicit product/developer documentation' "$policy"
 
+# The marketplace package includes the global policy required for projectless
+# user-scope work; a device-local skill is not a dependency.
+ambient="$test_root/plugin/skills/wiki-ambient/SKILL.md"
+test -f "$ambient"
+grep -q 'projectless work' "$ambient"
+
 # Retention dry-run finds expired autosaves; apply quarantines without deleting.
 old="$workspace/.wiki/inbox/autosave/old.md"
 printf 'old\n' >"$old"
