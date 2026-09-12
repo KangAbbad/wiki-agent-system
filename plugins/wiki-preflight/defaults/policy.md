@@ -13,8 +13,10 @@ plan, decision, verification, or changed artifact. Supply every applicable
 `--open-question`; use `--kind` to classify the capture. Do not ask the user to save it.
 Do not capture trivial replies, raw transcripts, tool output, or secrets.
 
-The Stop hook is crash/session fallback only. It cannot read the model's final response
-and is not a substitute for this semantic finalizer.
+The Stop hook receives the final assistant message. It blocks once to require this
+finalizer; if the agent still omits it, the hook persists a redacted structured
+fallback from that final message. This guarantees preservation, while a direct
+agent capture remains the richer record.
 
 Captures remain `pending-curation`. Promote material to `.wiki/raw/` only with
 supplied source content, an absolute HTTP(S) provenance URL, a title, and a

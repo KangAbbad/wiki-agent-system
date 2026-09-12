@@ -49,8 +49,9 @@ python3 "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture --cwd "$PWD" \
 
 Add each applicable `--decision`, `--artifact`, `--verification`, `--source`,
 and `--open-question`. This is mandatory agent behavior, not a suggestion to
-the user. The Stop hook is only a crash/session fallback: it cannot read the
-model's final response, so it cannot create a semantic summary.
+the user. The Stop hook enforces one finalizer continuation. If the agent still
+omits capture, it writes a redacted structured fallback from the final assistant
+message, so the result is preserved without a manual save command.
 
 Captures route to the resolved topic's `inbox/autosave/`; unresolved work routes to the hub's operational `.sessions/autosave/` until a topic exists. Capture is preservation, not evidence. Auto-canonicalize only a supplied, attributable source; otherwise leave the capture pending curation.
 

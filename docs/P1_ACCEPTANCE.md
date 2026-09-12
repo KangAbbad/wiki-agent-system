@@ -5,6 +5,8 @@ per control and ends with exactly `P1 ACCEPTANCE: PASS` or `P1 ACCEPTANCE: FAIL`
 
 The gate requires all controls below:
 
+- Stop enforces one semantic-finalizer continuation; a missed agent capture
+  falls back to a redacted structured capture of the real final message;
 - semantic capture redacts credential-like values and persists required outcome;
 - canonicalization accepts attributable evidence with SHA-256 provenance and
   rejects sensitive source material;

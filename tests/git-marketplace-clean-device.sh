@@ -17,9 +17,12 @@ test -n "$plugin" || fail "installed cache has no preflight hook"
 case "$plugin" in "$PWD"/*) fail "test used source tree instead of installed cache";; esac
 
 printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$root/workspace" | python3 "$plugin" >"$root/start.json"
-printf '{"cwd":"%s","hook_event_name":"Stop"}' "$root/workspace" | python3 "$plugin" >"$root/stop.json"
+printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"clean","turn_id":"one","stop_hook_active":false,"last_assistant_message":"Completed clean-device verification"}' "$root/workspace" | python3 "$plugin" >"$root/stop-first.json"
+grep -q '"decision": "block"' "$root/stop-first.json" || fail "installed Stop hook did not enforce finalizer"
+printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"clean","turn_id":"one","stop_hook_active":true,"last_assistant_message":"Capture omitted"}' "$root/workspace" | python3 "$plugin" >"$root/stop.json"
 
 test -f "$root/workspace/.wiki/.wiki-agent-system.json" || fail "installed hook did not initialize workspace wiki"
 find "$root/workspace/.wiki/inbox/autosave" -type f -name '*.md' -print -quit | grep -q . || fail "installed Stop hook did not capture"
+grep -R -q 'Completed clean-device verification' "$root/workspace/.wiki/inbox/autosave" || fail "installed Stop fallback omitted final result"
 grep -q 'Workspace knowledge index:' "$root/start.json" || fail "installed hook did not emit preflight context"
 printf '%s\n' 'PASS: Git marketplace clean-device install'
