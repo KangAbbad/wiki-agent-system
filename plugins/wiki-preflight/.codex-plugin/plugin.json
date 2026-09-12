@@ -1,18 +1,18 @@
 {
   "name": "wiki-preflight",
   "version": "0.1.0",
-  "description": "Wiki Preflight plugin",
+  "description": "Loads repository-scoped wiki knowledge before Codex work.",
   "author": {
     "name": "Local developer"
   },
   "skills": "./skills/",
   "interface": {
     "displayName": "Wiki Preflight",
-    "shortDescription": "Use Wiki Preflight in Codex.",
-    "longDescription": "Wiki Preflight adds a local Codex plugin scaffold.",
+    "shortDescription": "Load repository wiki knowledge first.",
+    "longDescription": "Injects repository-scoped LLM Wiki preflight context at session start.",
     "developerName": "Local developer",
     "category": "Productivity",
     "capabilities": [],
-    "defaultPrompt": "Help me use Wiki Preflight."
+    "defaultPrompt": "Use wiki preflight for this repository."
   }
 }
