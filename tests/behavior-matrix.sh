@@ -28,10 +28,10 @@ printf '%s\n' '# Research result' 'Use bounded retries for remote calls.' >"$wor
 run_hook UserPromptSubmit >"$test_root/research.json"
 grep -q 'bounded retries' "$test_root/research.json"
 
-# Stop auto-capture preserves uniqueness even inside one timestamp second.
+# Stop fallback preserves uniqueness even inside one timestamp second.
 run_hook Stop >/dev/null
 run_hook Stop >/dev/null
-test "$(find "$workspace/.wiki/inbox/autosave" -name '*-session.md' | wc -l | tr -d ' ')" -eq 2
+test "$(find "$workspace/.wiki/inbox/autosave" -name '*-semantic-fallback.md' | wc -l | tr -d ' ')" -eq 2
 
 # Docs routing is content policy, not a folder-name heuristic.
 policy="$test_root/plugin/defaults/policy.md"
