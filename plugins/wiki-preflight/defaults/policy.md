@@ -12,6 +12,8 @@ plan, decision, verification, or changed artifact. Supply every applicable
 `--decision`, `--artifact`, `--verification`, `--source`, `--confidence`, and
 `--open-question`; use `--kind` to classify the capture. Do not ask the user to save it.
 Do not capture trivial replies, raw transcripts, tool output, or secrets.
+Repeated semantic captures in one Codex task merge into one pending record;
+preserve decisions, artifacts, verification, sources, and open questions.
 
 The Stop hook never interrupts the user-facing response. When a workspace file
 changed during the turn and the agent omitted capture, it persists a redacted

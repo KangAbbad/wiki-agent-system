@@ -36,7 +36,7 @@ semantic_and_evidence() (
     --confidence high \
     --open-question 'None')
   printf '%s' "$result" | grep -q 'pending-curation'
-  capture=$(find "$workspace/.wiki/inbox/autosave" -type f -name '*-result.md')
+  capture=$(find "$workspace/.wiki/inbox/autosave" -type f -name 'session-*.md')
   test -n "$capture"
   grep -q 'token=\[REDACTED\]' "$capture"
   ! grep -q 'super-secret' "$capture"
@@ -77,6 +77,7 @@ from_root() (
 check 'plugin manifest' test -f "$root/plugins/wiki-preflight/.codex-plugin/plugin.json"
 check 'ambient configuration schema' python3 "$root/plugins/wiki-preflight/scripts/wiki_ambient.py" validate
 check 'agent-side semantic finalizer contract' sh "$root/tests/semantic-finalizer.sh" "$root/plugins/wiki-preflight"
+check 'per-task semantic capture deduplication' sh "$root/tests/capture-dedup.sh" "$root/plugins/wiki-preflight"
 check 'semantic capture and evidence gate' semantic_and_evidence
 check 'migration/version marker' migration_marker
 check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-preflight"

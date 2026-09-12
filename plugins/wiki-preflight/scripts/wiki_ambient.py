@@ -125,6 +125,28 @@ def atomic_write(path: Path, content: str):
         raise
 
 
+def capture_key() -> str:
+    """Keep one capture per Codex task without exposing its runtime identifier."""
+    session = os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or uuid.uuid4().hex
+    return hashlib.sha256(session.encode()).hexdigest()[:16]
+
+
+def prior_items(content: str, heading: str) -> list[str]:
+    match = re.search(rf"^## {re.escape(heading)}\n\n(.*?)(?=^## |\Z)", content, re.M | re.S)
+    if not match:
+        return []
+    return [line[2:].strip() for line in match.group(1).splitlines() if line.startswith("- ") and line[2:].strip() != "None"]
+
+
+def merge_items(previous: list[str], current: list[str]) -> list[str]:
+    return list(dict.fromkeys([*previous, *current]))
+
+
+def highest_confidence(previous: str, current: str) -> str:
+    levels = {"unverified": 0, "low": 1, "medium": 2, "high": 3}
+    return max((previous, current), key=lambda value: levels.get(value, 0))
+
+
 def capture(
     cwd: str,
     outcome: str,
@@ -153,8 +175,16 @@ def capture(
         destination = Path.home() / "wiki" / ".sessions" / "autosave"
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     captured = datetime.now(timezone.utc)
-    stamp = captured.strftime("%Y%m%dT%H%M%SZ")
-    output = destination / f"{stamp}-{uuid.uuid4().hex[:8]}-{kind}.md"
+    key = capture_key()
+    output = destination / f"session-{key}.md"
+    previous = output.read_text() if output.exists() else ""
+    previous_confidence = re.search(r"^confidence: (.+)$", previous, re.M)
+    decisions = merge_items(prior_items(previous, "Decisions"), [redact(value) for value in decisions if redact(value)])
+    artifacts = merge_items(prior_items(previous, "Artifacts"), [f"`{artifact}`" for artifact in safe_artifacts])
+    verifications = merge_items(prior_items(previous, "Verification"), [redact(value) for value in verifications if redact(value)])
+    sources = merge_items(prior_items(previous, "Sources"), [redact(value) for value in sources if redact(value)])
+    open_questions = merge_items(prior_items(previous, "Open questions"), [redact(value) for value in open_questions if redact(value)])
+    confidence = highest_confidence(previous_confidence.group(1).strip() if previous_confidence else "unverified", confidence)
     content = f"""---
 type: autosave-capture
 schema: 1
@@ -162,6 +192,7 @@ status: pending-curation
 kind: {kind}
 workspace: {workspace}
 topic: {route['topic'] or 'unresolved'}
+capture_key: {key}
 captured: {captured.isoformat()}
 confidence: {confidence}
 ---
@@ -178,7 +209,7 @@ confidence: {confidence}
 
 ## Artifacts
 
-{lines([f'`{artifact}`' for artifact in safe_artifacts])}
+{lines(artifacts)}
 
 ## Verification
 
@@ -193,7 +224,7 @@ confidence: {confidence}
 {lines(open_questions)}
 """
     atomic_write(output, content)
-    print(json.dumps({"path": str(output), "topic": route["topic"], "status": "pending-curation"}))
+    print(json.dumps({"path": str(output), "topic": route["topic"], "status": "updated" if previous else "pending-curation"}))
 
 
 def source_slug(value: str) -> str:

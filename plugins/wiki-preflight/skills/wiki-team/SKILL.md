@@ -53,6 +53,8 @@ the user. The Stop hook never creates a user-visible continuation. If a
 workspace file changed and the agent omitted capture, it writes a redacted
 structured fallback from the final assistant message, so the result is
 preserved without a manual save command.
+Repeated semantic captures from the same Codex task merge into one record;
+later calls add missing fields and replace the outcome with the final result.
 
 Captures route to the resolved topic's `inbox/autosave/`; unresolved work routes to the hub's operational `.sessions/autosave/` until a topic exists. Capture is preservation, not evidence. Auto-canonicalize only a supplied, attributable source; otherwise leave the capture pending curation.
 
