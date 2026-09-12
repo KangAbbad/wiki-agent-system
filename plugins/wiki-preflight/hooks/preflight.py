@@ -31,5 +31,7 @@ if root:
         os.replace(temporary, output)
     policy = (Path(__file__).resolve().parents[1] / "defaults" / "policy.md").read_text().strip()
     index = (root / "_index.md").read_text()[:4000]
-    text = f"{policy}\nWorkspace knowledge index:\n{index}"
+    captures = sorted((root / "inbox" / "autosave").glob("*.md"))[-3:]
+    recent = "\n\n".join(path.read_text()[:2000] for path in captures)
+    text = f"{policy}\nWorkspace knowledge index:\n{index}\nRecent captures:\n{recent}"
     print(json.dumps({"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name", "SessionStart"), "additionalContext": text}}))
