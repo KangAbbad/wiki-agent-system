@@ -5,6 +5,13 @@
   "suggest_writes": true,
   "require_explicit_write": true,
   "auto_capture": true,
+  "capture": {
+    "schema_version": 1,
+    "status": "pending-curation",
+    "required": ["outcome"],
+    "fields": ["decisions", "artifacts", "verification", "sources", "confidence", "open_questions"],
+    "redact_sensitive": true
+  },
   "auto_canonicalize": "evidence_only",
   "redact_sensitive": true,
   "scope_resolution": "automatic",

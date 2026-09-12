@@ -38,6 +38,11 @@ After a meaningful completed task, classify scope from the outcome; never requir
 
 Captures route to the resolved topic's `inbox/autosave/`; unresolved work routes to the hub's operational `.sessions/autosave/` until a topic exists. Capture is preservation, not evidence. Auto-canonicalize only a supplied, attributable source; otherwise leave the capture pending curation.
 
+Canonical evidence requires source content, an absolute HTTP(S) provenance URL,
+a title, and a content hash. Use `wiki_ambient.py canonicalize` only after those
+fields are available; it writes the evidence to `raw/`. Never promote an
+autosave, unsourced claim, secret, or `.env` file.
+
 For mixed or low-confidence scope, preserve a pending capture automatically and state the selected tentative scope. Accept ordinary-language correction and move future routing accordingly; do not require a command or topic name.
 
 ## Retention
