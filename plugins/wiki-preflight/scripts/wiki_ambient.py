@@ -30,18 +30,22 @@ def load():
     except FileNotFoundError:
         raise SystemExit(f"missing config template: {CONFIG_TEMPLATE}")
     except json.JSONDecodeError as error:
-        raise SystemExit(f"invalid JSON in {CONFIG}: {error}")
+        raise SystemExit(f"invalid JSON in {USER_CONFIG if user_config_exists else CONFIG_TEMPLATE}: {error}")
+    migrated = False
     if data.get("schema_version") == 1:
         topics = {}
         for workspace, topic in data.get("workspace_topics", {}).items():
             topics.setdefault(topic, {"workspace_roots": [], "aliases": []})["workspace_roots"].append(workspace)
         data["schema_version"] = 2
         data["topics"] = topics
-    migrated = False
+        migrated = True
+    if data.get("schema_version") == 2:
+        data["schema_version"] = 3
+        migrated = True
     if isinstance(data.get("retention"), dict) and "max_bytes" not in data["retention"]:
         data["retention"]["max_bytes"] = 1073741824
         migrated = True
-    if data.get("schema_version") != 2 or not isinstance(data.get("workspace_topics"), dict) or not isinstance(data.get("topics"), dict):
+    if data.get("schema_version") != 3 or not isinstance(data.get("workspace_topics"), dict) or not isinstance(data.get("topics"), dict):
         raise SystemExit("invalid ambient config schema")
     capture = data.get("capture")
     if (

@@ -8,6 +8,8 @@ description: Route repository work through its local LLM Wiki with automatic pre
 Use the global LLM Wiki without requiring `@wiki`.
 Mutable workspace-topic mappings are user-scope state in
 `~/.config/llm-wiki/wiki-agent-system.json`; plugin updates must never replace them.
+Schema migrations are additive and one-way. A newer unknown schema is never
+overwritten or downgraded.
 
 ## Route
 

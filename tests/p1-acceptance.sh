@@ -65,7 +65,12 @@ migration_marker() (
   mkdir "$workspace"
   printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"SessionStart\"}" | \
     python3 "$root/plugins/wiki-preflight/hooks/preflight.py" >/dev/null
-  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"schema_version": 1}' \
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"schema_version": 2}' \
+    "$workspace/.wiki/.wiki-agent-system.json"
+  printf '%s\n' '{"schema_version": 99}' >"$workspace/.wiki/.wiki-agent-system.json"
+  output=$(printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"SessionStart\"}" | python3 "$root/plugins/wiki-preflight/hooks/preflight.py")
+  printf '%s' "$output" | grep -q 'schema is newer'
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"schema_version": 99}' \
     "$workspace/.wiki/.wiki-agent-system.json"
 )
 
@@ -77,6 +82,7 @@ from_root() (
 check 'plugin manifest' test -f "$root/plugins/wiki-preflight/.codex-plugin/plugin.json"
 check 'ambient configuration schema' python3 "$root/plugins/wiki-preflight/scripts/wiki_ambient.py" validate
 check 'user-scope configuration survives plugin replacement' sh "$root/tests/config-persistence.sh" "$root/plugins/wiki-preflight"
+check 'user-scope configuration migration' sh "$root/tests/config-migration.sh" "$root/plugins/wiki-preflight"
 check 'agent-side semantic finalizer contract' sh "$root/tests/semantic-finalizer.sh" "$root/plugins/wiki-preflight"
 check 'per-task semantic capture deduplication' sh "$root/tests/capture-dedup.sh" "$root/plugins/wiki-preflight"
 check 'quota report and operational-data quarantine' sh "$root/tests/quota-retention.sh" "$root/plugins/wiki-preflight"

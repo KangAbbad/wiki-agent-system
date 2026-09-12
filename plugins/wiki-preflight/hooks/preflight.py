@@ -5,6 +5,33 @@ from pathlib import Path
 
 SENSITIVE = re.compile(r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*", re.I)
 IGNORED_WORKSPACE_DIRS = {".git", ".wiki", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", ".next", ".cache"}
+WORKSPACE_SCHEMA_VERSION = 2
+
+def atomic_json_write(path, data):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".schema-", text=True)
+    with os.fdopen(fd, "w") as file:
+        json.dump(data, file, sort_keys=True)
+        file.write("\n")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+def migrate_marker(marker):
+    if not marker.exists():
+        atomic_json_write(marker, {"schema_version": WORKSPACE_SCHEMA_VERSION})
+        return "created"
+    try:
+        data = json.loads(marker.read_text())
+        version = data.get("schema_version")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return "invalid"
+    if version == WORKSPACE_SCHEMA_VERSION:
+        return "current"
+    if version == 1:
+        data["schema_version"] = WORKSPACE_SCHEMA_VERSION
+        atomic_json_write(marker, data)
+        return "migrated"
+    return "future" if isinstance(version, int) and version > WORKSPACE_SCHEMA_VERSION else "invalid"
 
 def finalizer_state(root, payload):
     session_id = str(payload.get("session_id") or "unknown")
@@ -42,9 +69,12 @@ if root is None and cwd.is_dir():
     (root / "_index.md").write_text("# Workspace Wiki\n\n## Knowledge\n\n- [Raw](raw/)\n- [Articles](wiki/)\n- [Output](output/)\n")
 if root:
     marker = root / ".wiki-agent-system.json"
-    if not marker.exists():
-        marker.write_text('{"schema_version":1}\n')
     event = payload.get("hook_event_name", "SessionStart")
+    marker_state = migrate_marker(marker)
+    if marker_state in {"future", "invalid"}:
+        detail = "newer" if marker_state == "future" else "invalid"
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": f"Workspace Wiki Agent System schema is {detail}; do not modify it until a compatible plugin is installed."}}))
+        raise SystemExit(0)
     if event == "UserPromptSubmit":
         state = finalizer_state(root, payload)
         state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

@@ -6,6 +6,8 @@ Mutable Wiki Agent System configuration lives in
 `~/.config/llm-wiki/wiki-agent-system.json`, never in the versioned plugin cache.
 Measure quota against the local `.wiki/`; quarantine expired operational files
 only. Never auto-delete or quarantine canonical `raw/`, `wiki/`, or `output/`.
+Workspace marker and user configuration migrate only forward. A marker or config
+with a newer schema is read-only until a compatible plugin version is installed.
 
 ## Semantic finalizer
 

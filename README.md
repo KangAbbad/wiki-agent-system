@@ -46,6 +46,10 @@ mapping to `~/.config/llm-wiki/wiki-agent-system.json` (or
 `$XDG_CONFIG_HOME/llm-wiki/wiki-agent-system.json`). Plugin updates never
 overwrite this file.
 
+Both this file and `.wiki/.wiki-agent-system.json` use forward-only schema
+migrations. A newer unknown schema is left untouched until a compatible plugin
+is installed.
+
 ## Storage control
 
 `retention.py <workspace>` reports `.wiki/` usage against the user-configured
