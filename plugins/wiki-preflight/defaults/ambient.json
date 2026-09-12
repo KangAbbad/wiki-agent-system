@@ -1,0 +1,37 @@
+{
+  "schema_version": 2,
+  "enabled": true,
+  "ambient_read": true,
+  "suggest_writes": true,
+  "require_explicit_write": true,
+  "auto_capture": true,
+  "auto_canonicalize": "evidence_only",
+  "redact_sensitive": true,
+  "scope_resolution": "automatic",
+  "knowledge_preflight": true,
+  "workspace_start": {
+    "initialize_local_wiki": true,
+    "empty_workspace_is_workspace_scope": true
+  },
+  "repo_scope": {
+    "initialize_local_wiki": true,
+    "signals": ["workspace_changes", "verification", "bug_investigation", "architecture", "api_contract", "schema", "dependency", "deployment"]
+  },
+  "retention": {
+    "queue_days": 30,
+    "state_days": 30,
+    "autosave_days": 90,
+    "digest_days": 180,
+    "trash_days": 30,
+    "warn_percent": 70,
+    "plan_percent": 85,
+    "block_large_write_percent": 95
+  },
+  "workspace_topics": {},
+  "topics": {
+    "knowledge-test": {
+      "workspace_roots": [],
+      "aliases": []
+    }
+  }
+}
