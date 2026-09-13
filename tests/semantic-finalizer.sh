@@ -14,8 +14,8 @@ context=$(printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"UserPromptS
 printf '%s\n' "$context" | grep -Fq 'Before sending the final response for meaningful workspace work, run'
 printf '%s\n' "$context" | grep -Fq 'Do not ask the user to save it.'
 printf '%s\n' "$context" | grep -Fq 'The Stop hook never interrupts the user-facing response.'
-grep -Fq '### Required semantic finalizer' "$plugin_root/skills/wiki-team/SKILL.md"
-grep -Fq 'Before sending the final response for meaningful workspace work, execute the' "$plugin_root/skills/wiki-team/SKILL.md"
+grep -Fq '### Required semantic finalizer' "$plugin_root/skills/wiki-workspace/SKILL.md"
+grep -Fq 'Before sending the final response for meaningful workspace work, execute the' "$plugin_root/skills/wiki-workspace/SKILL.md"
 
 printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"test\",\"turn_id\":\"one\"}" | python3 "$plugin_root/hooks/preflight.py" >/dev/null
 printf '%s\n' 'changed=true' >"$workspace/changed.txt"

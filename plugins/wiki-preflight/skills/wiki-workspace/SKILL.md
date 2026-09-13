@@ -1,5 +1,5 @@
 ---
-name: wiki-team
+name: wiki-workspace
 description: Route repository work through its local LLM Wiki with automatic preflight, capture, and knowledge-aware document placement.
 ---
 

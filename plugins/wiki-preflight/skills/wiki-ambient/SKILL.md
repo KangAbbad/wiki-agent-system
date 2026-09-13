@@ -7,7 +7,7 @@ description: Route ordinary Codex work through LLM Wiki when prior knowledge, so
 
 Use the global LLM Wiki without requiring `@wiki`. This is the distributed
 policy for user-scope and projectless work. For repository work, apply the
-companion `wiki-team` skill and its lifecycle hooks.
+companion `wiki-workspace` skill and its lifecycle hooks.
 
 ## Route
 
@@ -18,7 +18,7 @@ Classify each task before accessing the wiki:
 - **suggest-write**: a durable decision, source, idea, or follow-up emerges without a request to save it. Complete the task, then offer one specific save action.
 - **explicit-write**: user asks to save, ingest, record, promote, archive, compile, or confirms a proposed write. Use the smallest LLM Wiki workflow that fits.
 
-For workspace-backed work, `wiki-team` owns local `.wiki/` initialization and
+For workspace-backed work, `wiki-workspace` owns local `.wiki/` initialization and
 preflight. For projectless work, resolve the global hub before a wiki operation;
 preserve cross-repo research, ideas, and preferences as user-scope state.
 
