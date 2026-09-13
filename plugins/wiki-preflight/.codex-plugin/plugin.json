@@ -1,6 +1,6 @@
 {
   "name": "wiki-preflight",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Loads repository-scoped wiki knowledge before Codex work.",
   "author": {
     "name": "Local developer"

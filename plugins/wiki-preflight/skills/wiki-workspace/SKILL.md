@@ -80,3 +80,10 @@ the retention command reads the same user-scope policy.
 ## Document placement
 
 Classify document content, not the word "docs". Research, decisions, system previews, plans, reports, captures, and knowledge artifacts default to `.wiki/output/`. Use repository `docs/` only for an explicit product/developer deliverable such as an API guide, contributor guide, or README-linked documentation. Do not ask the user to choose when scope is clear.
+
+## Git hygiene
+
+For a Git workspace, the hook idempotently ignores `.wiki/.sessions/`. When an
+authorized commit includes related repository work, include the relevant durable
+`.wiki/` knowledge with it. Never stage or commit `.wiki/.sessions/`, and never
+create a commit unless the user authorizes it.

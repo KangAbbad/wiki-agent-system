@@ -32,3 +32,11 @@ Captures remain `pending-curation`. Promote material to `.wiki/raw/` only with
 supplied source content, an absolute HTTP(S) provenance URL, a title, and a
 content hash. Never canonicalize secrets, environment files, or unsupported
 claims.
+
+## Git hygiene
+
+For a Git workspace, the hook ensures the local wiki runtime directory
+`.wiki/.sessions/` is ignored. When an authorized commit includes related
+repository work, include the relevant durable `.wiki/` knowledge with it; never
+stage or commit `.wiki/.sessions/`. Do not create commits without user
+authorization.

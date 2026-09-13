@@ -17,8 +17,16 @@ Commit `.wiki/` with repository knowledge. Keep `.wiki/.sessions/` untracked.
 
 ## Repository setup
 
-Copy `templates/AGENTS.md` into the target repository root. The plugin reads
-the local wiki preflight; the repository policy controls capture and placement.
+No per-repository `AGENTS.md` copy is required. On every SessionStart and
+UserPromptSubmit, the plugin initializes or validates the workspace wiki and
+injects its repository policy into the agent context. This applies to empty and
+non-Git workspaces as well. The plugin never writes `AGENTS.md` into a user
+repository.
+
+For Git workspaces, the hook adds `.wiki/.sessions/` to the repository's
+`.gitignore` without touching non-Git workspaces. When a related commit is
+authorized, include the relevant durable `.wiki/` knowledge; never stage the
+runtime session directory.
 
 ## Structured capture
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import hashlib, json, sys, os, re, tempfile, time, uuid
+import hashlib, json, sys, os, re, subprocess, tempfile, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,6 +54,43 @@ def workspace_changed_since(cwd, started_at):
                 return False
     return False
 
+def ensure_sessions_ignored(root, cwd):
+    """Keep plugin runtime state out of Git without touching non-Git workspaces."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if result.returncode:
+        return
+    repo = Path(result.stdout.strip())
+    try:
+        pattern = (root.relative_to(repo) / ".sessions").as_posix() + "/"
+    except ValueError:
+        return
+    gitignore = repo / ".gitignore"
+    try:
+        current = gitignore.read_text() if gitignore.exists() else ""
+    except OSError:
+        return
+    if any(line.strip().lstrip("/").rstrip("/") == pattern.rstrip("/") for line in current.splitlines()):
+        return
+    suffix = "" if not current or current.endswith("\n") else "\n"
+    fd, temporary = tempfile.mkstemp(dir=repo, prefix=".gitignore.", text=True)
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(f"{current}{suffix}# Wiki Agent System runtime state\n{pattern}\n")
+        if gitignore.exists():
+            os.chmod(temporary, gitignore.stat().st_mode & 0o777)
+        os.replace(temporary, gitignore)
+    except OSError:
+        Path(temporary).unlink(missing_ok=True)
+
 payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
 cwd = Path(payload.get("cwd") or payload.get("workspace_root") or ".").resolve()
 existing = next((p / ".wiki" for p in (cwd, *cwd.parents) if (p / ".wiki").is_dir()), None)
@@ -68,6 +105,7 @@ if root is None and cwd.is_dir():
     (root / "config.md").write_text("# Workspace Wiki\n")
     (root / "_index.md").write_text("# Workspace Wiki\n\n## Knowledge\n\n- [Raw](raw/)\n- [Articles](wiki/)\n- [Output](output/)\n")
 if root:
+    ensure_sessions_ignored(root, cwd)
     marker = root / ".wiki-agent-system.json"
     event = payload.get("hook_event_name", "SessionStart")
     marker_state = migrate_marker(marker)
