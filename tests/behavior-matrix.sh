@@ -7,12 +7,13 @@ test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
 cp -R "$plugin_root" "$test_root/plugin"
 hook="$test_root/plugin/hooks/preflight.py"
+launcher="$test_root/plugin/hooks/launcher.sh"
 workspace="$test_root/non-git-workspace"
 mkdir "$workspace"
 
 run_hook() {
   event=$1
-  printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"$event\"}" | python3 "$hook"
+  printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"$event\"}" | "$launcher" "$hook"
 }
 
 # Empty, non-Git workspace bootstraps a valid schema-owned wiki.
@@ -29,13 +30,13 @@ run_hook UserPromptSubmit >"$test_root/research.json"
 grep -q 'bounded retries' "$test_root/research.json"
 
 # Stop fallback is quiet, only follows a workspace change, and stays unique.
-printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"one"}' | python3 "$hook" >/dev/null
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"one"}' | "$launcher" "$hook" >/dev/null
 printf 'one\n' >"$workspace/one.txt"
-printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"one","last_assistant_message":"Completed one"}' | python3 "$hook" >"$test_root/stop-one.json"
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"one","last_assistant_message":"Completed one"}' | "$launcher" "$hook" >"$test_root/stop-one.json"
 ! grep -q '"decision": "block"' "$test_root/stop-one.json"
-printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"two"}' | python3 "$hook" >/dev/null
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"two"}' | "$launcher" "$hook" >/dev/null
 printf 'two\n' >"$workspace/two.txt"
-printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"two","last_assistant_message":"Completed two"}' | python3 "$hook" >/dev/null
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"two","last_assistant_message":"Completed two"}' | "$launcher" "$hook" >/dev/null
 test "$(find "$workspace/.wiki/inbox/autosave" -name '*-semantic-fallback.md' | wc -l | tr -d ' ')" -eq 2
 
 # Docs routing is content policy, not a folder-name heuristic.
@@ -53,10 +54,10 @@ grep -q 'projectless work' "$ambient"
 old="$workspace/.wiki/inbox/autosave/old.md"
 printf 'old\n' >"$old"
 touch -t 202001010000 "$old"
-python3 "$test_root/plugin/scripts/retention.py" "$workspace" >"$test_root/retention-dry.json"
+"$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/retention.py" "$workspace" >"$test_root/retention-dry.json"
 grep -q 'old.md' "$test_root/retention-dry.json"
 test -f "$old"
-python3 "$test_root/plugin/scripts/retention.py" "$workspace" --apply >"$test_root/retention-apply.json"
+"$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/retention.py" "$workspace" --apply >"$test_root/retention-apply.json"
 test -f "$workspace/.wiki/.trash/autosave/old.md"
 test ! -f "$old"
 
@@ -70,11 +71,11 @@ test -f "$workspace/.wiki/inbox/autosave/research.md"
 foreign="$test_root/foreign-workspace"
 mkdir -p "$foreign/.wiki"
 printf 'foreign\n' >"$foreign/.wiki/marker"
-printf '%s' "{\"cwd\":\"$foreign\",\"hook_event_name\":\"SessionStart\"}" | python3 "$hook" >"$test_root/foreign.json"
+printf '%s' "{\"cwd\":\"$foreign\",\"hook_event_name\":\"SessionStart\"}" | "$launcher" "$hook" >"$test_root/foreign.json"
 grep -q 'Foreign/incomplete wiki' "$test_root/foreign.json"
 test -f "$foreign/.wiki/marker"
 test ! -e "$foreign/.wiki/_index.md"
-printf '%s' "{\"cwd\":\"$foreign\",\"hook_event_name\":\"Stop\"}" | python3 "$hook" >/dev/null
+printf '%s' "{\"cwd\":\"$foreign\",\"hook_event_name\":\"Stop\"}" | "$launcher" "$hook" >/dev/null
 test ! -d "$foreign/.wiki/inbox"
 
 # Coexistence shape: this plugin owns each lifecycle event once and does not

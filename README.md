@@ -13,7 +13,8 @@ codex plugin marketplace add KangAbbad/wiki-agent-system --ref main
 codex plugin add wiki-preflight@wiki-agent-system
 ```
 
-Commit `.wiki/` with repository knowledge. Keep `.wiki/.sessions/` untracked.
+Commit durable repository `.wiki/` knowledge only as part of a user-authorized
+commit. Keep `.wiki/.sessions/` untracked; the plugin never stages or commits.
 
 ## Repository setup
 
@@ -26,7 +27,13 @@ repository.
 For Git workspaces, the hook adds `.wiki/.sessions/` to the repository's
 `.gitignore` without touching non-Git workspaces. When a related commit is
 authorized, include the relevant durable `.wiki/` knowledge; never stage the
-runtime session directory.
+runtime session directory. User Wiki/configuration and Mnemosyne remain outside
+the repository boundary. Mnemosyne has no automatic team sync or shared-memory
+path. If `HOME`, `XDG_CONFIG_HOME`, or their resolved private targets point
+inside a Git repository, the capture command fails closed before creating
+private files there. Lifecycle hooks invoke a launcher that disables Python
+bytecode writes and redirects any interpreter cache outside the worktree before
+Python starts.
 
 ## Structured capture
 
@@ -35,7 +42,7 @@ redacted, pending-curation record; it does not make unsupported claims
 canonical.
 
 ```bash
-python3 "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture \
+"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture \
   --cwd "$PWD" \
   --outcome "Implemented webhook verification" \
   --kind result \
@@ -50,6 +57,22 @@ python3 "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture \
 Outcome is required. Optional fields: decisions, workspace-relative artifacts,
 verification, attributable sources, confidence, and open questions.
 Credential-like values are replaced with `[REDACTED]`.
+
+## Optional personal memory
+
+`capture --scope personal` uses the optional `mnemosyne` CLI when available.
+The adapter stores only one bounded, redacted preference/fact supplied through
+an explicit `--decision` field and a Wiki pointer; it abstains on outcome-only
+or transcript-shaped prose and never writes personal data to the repository
+Wiki. Session scope is the default. Set `MNEMOSYNE_DEFAULT_SCOPE=global` only
+when global storage is explicitly intended. Set `MNEMOSYNE_CLI` to a fixture
+or alternate CLI path for tests. Missing, invalid, or timed-out adapters
+return diagnostics and leave the capture flow successful.
+
+`retrieve --prompt ...` is intent-gated and bounded. It checks records with
+`status: canonical` and a valid `canonical_uri` in the Workspace Wiki first,
+User Wiki records second, and private Mnemosyne hints last. Mnemosyne results
+are hints, never evidence or proof.
 
 ## Device configuration
 

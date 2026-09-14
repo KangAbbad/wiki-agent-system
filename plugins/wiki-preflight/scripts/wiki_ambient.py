@@ -6,24 +6,94 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
+sys.dont_write_bytecode = True
+
 
 CONFIG_TEMPLATE = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
 USER_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-wiki" / "wiki-agent-system.json"
+AMBIENT_SCHEMA_VERSION = 3
+CAPTURE_SCHEMA_VERSION = 2
+CAPTURE_SCOPES = frozenset({"workspace", "user", "personal", "uncertain"})
+LIFECYCLE_STATES = frozenset({"pending-curation", "canonical", "superseded", "retracted"})
+LIFECYCLE_TRANSITIONS = {
+    "pending-curation": frozenset({"canonical", "superseded", "retracted"}),
+    "canonical": frozenset({"superseded", "retracted"}),
+    "superseded": frozenset(),
+    "retracted": frozenset(),
+}
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SENSITIVE = re.compile(
     r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*",
     re.I,
 )
+MNEMOSYNE_TIMEOUT_SECONDS = 2.0
+PERSONAL_MEMORY_MAX_CHARS = 240
+PERSONAL_TRANSCRIPT_MARKERS = re.compile(
+    r"(?:^|\s)(?:user|assistant|system|developer|human|agent)\s*:", re.I
+)
+RETRIEVAL_MAX_RESULTS = 5
+RETRIEVAL_MAX_BYTES = 6000
+RETRIEVAL_MAX_FILE_BYTES = 32768
+RETRIEVAL_SIGNALS = {
+    "continuation": re.compile(r"\b(?:continue|resume|previous|earlier|last time|as before|pick up)\b", re.I),
+    "prior-decision": re.compile(r"\b(?:decision|decided|rationale|trade[- ]?off|agreed|why did we)\b", re.I),
+    "research": re.compile(r"\b(?:research|investigat|evidence|source|paper|spec(?:ification)?|reference)\b", re.I),
+    "architecture": re.compile(r"\b(?:architect(?:ure)?|design|schema|migration|component|integration)\b", re.I),
+    "repeated-investigation": re.compile(r"\b(?:same (?:bug|issue|problem)|regression|revisit|historical)\b", re.I),
+}
+RETRIEVAL_STOPWORDS = {
+    "about",
+    "again",
+    "after",
+    "and",
+    "are",
+    "been",
+    "before",
+    "from",
+    "have",
+    "into",
+    "that",
+    "the",
+    "this",
+    "with",
+    "what",
+    "when",
+    "where",
+    "which",
+    "will",
+    "would",
+}
+
+
+def git_root(path: Path):
+    resolved = path.expanduser().resolve()
+    return next((candidate for candidate in (resolved, *resolved.parents) if (candidate / ".git").exists()), None)
+
+
+def ensure_private_state_outside_git():
+    targets = {
+        "home": Path.home(),
+        "user configuration": USER_CONFIG,
+        "user Wiki": Path.home() / "wiki",
+    }
+    for label, path in targets.items():
+        repository = git_root(path)
+        if repository:
+            raise SystemExit(f"private {label} path must be outside Git repository: {path}")
 
 
 def load():
+    ensure_private_state_outside_git()
     user_config_exists = USER_CONFIG.exists()
     try:
         data = json.loads(USER_CONFIG.read_text() if user_config_exists else CONFIG_TEMPLATE.read_text())
@@ -31,6 +101,9 @@ def load():
         raise SystemExit(f"missing config template: {CONFIG_TEMPLATE}")
     except json.JSONDecodeError as error:
         raise SystemExit(f"invalid JSON in {USER_CONFIG if user_config_exists else CONFIG_TEMPLATE}: {error}")
+    version = data.get("schema_version")
+    if type(version) is int and version > AMBIENT_SCHEMA_VERSION:
+        raise SystemExit("ambient config schema is newer; install a compatible runtime before writing")
     migrated = False
     if data.get("schema_version") == 1:
         topics = {}
@@ -45,7 +118,7 @@ def load():
     if isinstance(data.get("retention"), dict) and "max_bytes" not in data["retention"]:
         data["retention"]["max_bytes"] = 1073741824
         migrated = True
-    if data.get("schema_version") != 3 or not isinstance(data.get("workspace_topics"), dict) or not isinstance(data.get("topics"), dict):
+    if data.get("schema_version") != AMBIENT_SCHEMA_VERSION or not isinstance(data.get("workspace_topics"), dict) or not isinstance(data.get("topics"), dict):
         raise SystemExit("invalid ambient config schema")
     capture = data.get("capture")
     if (
@@ -120,6 +193,102 @@ def redact(value: str) -> str:
     return SENSITIVE.sub(lambda match: f"{match.group(1)} [REDACTED]", value).strip()
 
 
+def mnemosyne_scope() -> str:
+    scope = os.environ.get("MNEMOSYNE_DEFAULT_SCOPE", "").strip().lower()
+    return scope if scope in {"session", "global"} else "session"
+
+
+def mnemosyne_executable():
+    configured = os.environ.get("MNEMOSYNE_CLI", "").strip()
+    if configured:
+        return shutil.which(configured) or (configured if Path(configured).is_file() else None)
+    return shutil.which("mnemosyne")
+
+
+def adapter_detail(value: str) -> str:
+    return redact(value or "").replace("\n", " ")[:240]
+
+
+def mnemosyne_command(arguments: list[str], scope: str, timeout: float = MNEMOSYNE_TIMEOUT_SECONDS) -> dict:
+    executable = mnemosyne_executable()
+    if not executable:
+        return {"status": "unavailable", "provider": "mnemosyne", "scope": scope, "reason": "cli-not-found"}
+    environment = {
+        name: os.environ[name]
+        for name in ("HOME", "PATH", "TMPDIR", "XDG_CONFIG_HOME")
+        if os.environ.get(name)
+    }
+    environment["MNEMOSYNE_DEFAULT_SCOPE"] = scope
+    try:
+        result = subprocess.run(
+            [executable, *arguments],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "timeout", "provider": "mnemosyne", "scope": scope, "reason": "adapter-timeout"}
+    except OSError as error:
+        return {"status": "unavailable", "provider": "mnemosyne", "scope": scope, "reason": adapter_detail(str(error))}
+    if result.returncode:
+        return {"status": "error", "provider": "mnemosyne", "scope": scope, "reason": adapter_detail(result.stderr or result.stdout) or "adapter-failed"}
+    return {"status": "ok", "provider": "mnemosyne", "scope": scope, "stdout": result.stdout}
+
+
+def personal_memory_summary(decisions: list[str]) -> str:
+    if len(decisions) != 1:
+        return ""
+    candidate = decisions[0]
+    if "\n" in candidate or "\r" in candidate or PERSONAL_TRANSCRIPT_MARKERS.search(candidate):
+        return ""
+    candidate = re.sub(r"\s+", " ", redact(candidate)).strip()
+    return candidate if 0 < len(candidate) <= PERSONAL_MEMORY_MAX_CHARS else ""
+
+
+def mnemosyne_remember(summary: str, canonical_uri: str) -> dict:
+    if not summary:
+        return {"status": "abstained", "provider": "mnemosyne", "scope": mnemosyne_scope(), "reason": "no-explicit-personal-fact"}
+    scope = mnemosyne_scope()
+    result = mnemosyne_command(["store", summary, f"wiki-preflight:{canonical_uri}", "0.5"], scope)
+    if result["status"] != "ok":
+        return result
+    if not result.get("stdout", "").lstrip().startswith("Stored:"):
+        return {"status": "invalid", "provider": "mnemosyne", "scope": scope, "reason": "invalid-adapter-response"}
+    return {"status": "stored", "provider": "mnemosyne", "scope": scope}
+
+
+def mnemosyne_recall(query: str, limit: int = 2, timeout: float = MNEMOSYNE_TIMEOUT_SECONDS) -> dict:
+    scope = mnemosyne_scope()
+    if not query:
+        return {"status": "abstained", "provider": "mnemosyne", "scope": scope, "results": [], "reason": "empty-query"}
+    result = mnemosyne_command(["recall", query, str(limit), "--json"], scope, timeout)
+    if result["status"] != "ok":
+        result["results"] = []
+        result.pop("stdout", None)
+        return result
+    try:
+        payload = json.loads(result.get("stdout", ""))
+        raw_results = payload.get("results", [])
+        if not isinstance(raw_results, list):
+            raise ValueError("results must be a list")
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {"status": "invalid", "provider": "mnemosyne", "scope": scope, "results": [], "reason": "invalid-adapter-response"}
+    results = []
+    for item in raw_results[:limit]:
+        if not isinstance(item, dict):
+            continue
+        content = re.sub(r"\s+", " ", redact(str(item.get("content", "")))).strip()[:400]
+        try:
+            score = float(item.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0.0
+        if content:
+            results.append({"content": content, "score": score})
+    return {"status": "ok", "provider": "mnemosyne", "scope": scope, "results": results}
+
+
 def lines(values: list[str]) -> str:
     return "\n".join(f"- {redact(value)}" for value in values if redact(value)) or "- None"
 
@@ -150,6 +319,278 @@ def capture_key() -> str:
     """Keep one capture per Codex task without exposing its runtime identifier."""
     session = os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or uuid.uuid4().hex
     return hashlib.sha256(session.encode()).hexdigest()[:16]
+
+
+def canonical_capture_uri(scope: str, origin_workspace: str, key: str) -> str:
+    if scope not in CAPTURE_SCOPES:
+        raise SystemExit("capture scope is invalid")
+    origin = str(Path(origin_workspace).resolve())
+    origin_hash = hashlib.sha256(origin.encode()).hexdigest()[:16]
+    return f"wiki://{scope}/capture/{origin_hash}/{key}"
+
+
+def capture_schema(content: str) -> int:
+    """Read known capture versions; leave unknown future records untouched."""
+    header = content.split("\n---", 1)[0] if content.startswith("---\n") else ""
+    match = re.search(r"^schema:\s*(.+?)\s*$", header, re.M)
+    if not match:
+        return 1
+    try:
+        schema = int(match.group(1))
+    except ValueError:
+        raise SystemExit("capture schema is invalid")
+    if schema < 1:
+        raise SystemExit("capture schema is invalid")
+    if schema > CAPTURE_SCHEMA_VERSION:
+        raise SystemExit("capture schema is newer; install a compatible runtime before writing")
+    return schema
+
+
+def frontmatter_fields(content: str) -> dict:
+    if not content.startswith("---\n"):
+        raise SystemExit("record frontmatter is missing")
+    marker = re.search(r"(?m)^---\s*$", content[4:])
+    if not marker:
+        raise SystemExit("record frontmatter is invalid")
+    fields = {}
+    for line in content[4 : 4 + marker.start()].splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if value == "null":
+            fields[key] = None
+        elif value.startswith('"'):
+            try:
+                fields[key] = json.loads(value)
+            except json.JSONDecodeError:
+                raise SystemExit("record frontmatter is invalid")
+        else:
+            fields[key] = value
+    return fields
+
+
+def frontmatter_literal(key: str, value) -> str:
+    if value is None:
+        return "null"
+    if key in {"canonical_uri", "origin_workspace", "supersedes"}:
+        return json.dumps(value)
+    return str(value)
+
+
+def update_frontmatter(content: str, updates: dict) -> str:
+    marker = re.search(r"(?m)^---\s*$", content[4:]) if content.startswith("---\n") else None
+    if not marker:
+        raise SystemExit("record frontmatter is invalid")
+    close = 4 + marker.start()
+    lines = content[4:close].splitlines()
+    replaced = set()
+    for index, line in enumerate(lines):
+        key = line.split(":", 1)[0].strip() if ":" in line else ""
+        if key in updates:
+            lines[index] = f"{key}: {frontmatter_literal(key, updates[key])}"
+            replaced.add(key)
+    lines.extend(
+        f"{key}: {frontmatter_literal(key, value)}"
+        for key, value in updates.items()
+        if key not in replaced
+    )
+    return "---\n" + "\n".join(lines) + "\n" + content[close:]
+
+
+def valid_canonical_uri(value) -> bool:
+    if not isinstance(value, str) or any(character.isspace() for character in value):
+        return False
+    parsed = urlparse(value)
+    parts = parsed.path.split("/")
+    return (
+        parsed.scheme == "wiki"
+        and parsed.netloc in CAPTURE_SCOPES
+        and len(parts) == 4
+        and parts[1] == "capture"
+        and all(parts[2:])
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def resolve_local_canonical_record(local_wiki: Path, canonical_uri: str) -> Path:
+    matches = []
+    # ponytail: bounded local scan; use a Wiki index only when repository size makes this measurable.
+    for path in local_wiki.rglob("*.md"):
+        if not path.is_file():
+            continue
+        try:
+            if not path.resolve().is_relative_to(local_wiki):
+                continue
+            content = path.read_text(encoding="utf-8")
+            if not content.startswith("---\n"):
+                continue
+            fields = frontmatter_fields(content)
+        except (OSError, UnicodeError, SystemExit):
+            continue
+        if fields.get("canonical_uri") == canonical_uri:
+            matches.append((path, fields.get("status")))
+    if len(matches) != 1 or matches[0][1] != "canonical":
+        raise SystemExit("supersedes URI must resolve to exactly one local canonical record")
+    return matches[0][0]
+
+
+def lifecycle_record(cwd: str, record: str):
+    load()
+    route = json.loads(capture_resolve(cwd))
+    if route["local_wiki_status"] != "valid":
+        raise SystemExit("lifecycle transition requires a valid local LLM Wiki")
+    local_wiki = Path(route["local_wiki"]).resolve()
+    workspace = local_wiki.parent
+    candidate = Path(record).expanduser()
+    if not candidate.is_absolute():
+        candidate = workspace / candidate
+    candidate = candidate.resolve()
+    if not candidate.is_relative_to(local_wiki) or not candidate.is_file():
+        raise SystemExit("record must be an existing file inside the local Wiki")
+    content = candidate.read_text(encoding="utf-8")
+    schema = capture_schema(content)
+    if schema < CAPTURE_SCHEMA_VERSION:
+        raise SystemExit("lifecycle transition requires capture schema 2")
+    fields = frontmatter_fields(content)
+    if fields.get("type") not in {"autosave-capture", "semantic-stop-capture"}:
+        raise SystemExit("only capture records can be transitioned")
+    current = fields.get("status")
+    canonical_uri = fields.get("canonical_uri")
+    if current not in LIFECYCLE_STATES or current not in LIFECYCLE_TRANSITIONS:
+        raise SystemExit("record lifecycle status is invalid")
+    if not valid_canonical_uri(canonical_uri):
+        raise SystemExit("record canonical_uri is invalid")
+    return route, local_wiki, candidate, content, fields
+
+
+def transition_record(cwd: str, record: str, status: str, supersedes):
+    route, local_wiki, source, content, fields = lifecycle_record(cwd, record)
+    current = fields["status"]
+    if status not in LIFECYCLE_STATES or status == "pending-curation":
+        raise SystemExit("target lifecycle status is invalid")
+    if status not in LIFECYCLE_TRANSITIONS[current]:
+        raise SystemExit(f"invalid lifecycle transition: {current} -> {status}")
+    if status == "canonical":
+        if supersedes is not None:
+            raise SystemExit("canonical records cannot declare supersedes")
+        updates = {"status": "canonical", "valid_until": None}
+    else:
+        if not valid_canonical_uri(supersedes):
+            raise SystemExit("superseded and retracted records require a canonical supersedes URI")
+        if supersedes == fields["canonical_uri"]:
+            raise SystemExit("record cannot supersede itself")
+        resolve_local_canonical_record(local_wiki, supersedes)
+        updates = {"status": status, "supersedes": supersedes, "valid_until": datetime.now(timezone.utc).isoformat()}
+    updated = update_frontmatter(content, updates)
+    canonical_root = local_wiki / "wiki"
+    destination = source
+    if not source.is_relative_to(canonical_root):
+        destination = canonical_root / "captures" / source.name
+        if destination.exists():
+            raise SystemExit("canonical destination already exists")
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if destination != source:
+        source.rename(destination)
+    atomic_write(destination, updated)
+    print(json.dumps({
+        "path": str(destination),
+        "previous_path": str(source) if destination != source else None,
+        "canonical_uri": fields["canonical_uri"],
+        "status": status,
+        "supersedes": updates.get("supersedes"),
+        "valid_from": fields.get("valid_from"),
+        "valid_until": updates.get("valid_until", fields.get("valid_until")),
+    }))
+
+
+def redact_values(values: list[str]) -> list[str]:
+    redacted = []
+    for value in values:
+        value = redact(value)
+        if value:
+            redacted.append(value)
+    return redacted
+
+
+def resolve_capture_scope(requested: str, route: dict) -> str:
+    if requested == "auto":
+        if route["local_wiki_status"] == "valid":
+            return "workspace"
+        if route["local_wiki_status"] == "foreign":
+            raise SystemExit("auto scope cannot bypass a foreign or incomplete local Wiki")
+        return "user" if route["topic"] else "uncertain"
+    if requested not in CAPTURE_SCOPES:
+        raise SystemExit("capture scope is invalid")
+    if requested == "workspace" and route["local_wiki_status"] != "valid":
+        raise SystemExit("workspace scope requires a valid local LLM Wiki")
+    return requested
+
+
+def workspace_identity(route: dict, workspace: Path) -> Path:
+    if route.get("local_wiki"):
+        return Path(route["local_wiki"]).parent
+    if route.get("workspace_root"):
+        return Path(route["workspace_root"])
+    return workspace
+
+
+def capture_destination(scope: str, route: dict) -> Path:
+    if scope == "workspace":
+        return Path(route["local_wiki"]) / "inbox" / "autosave"
+    user_root = (Path.home() / "wiki").resolve()
+    if scope == "user":
+        if route["topic"] and (user_root / "topics" / route["topic"]).is_dir():
+            return user_root / "topics" / route["topic"] / "inbox" / "autosave"
+        return user_root / "inbox" / "autosave"
+    if scope == "uncertain":
+        return user_root / "inbox" / "pending-scope"
+    raise SystemExit("capture scope has no Wiki destination")
+
+
+def personal_handoff(
+    workspace: Path,
+    key: str,
+    canonical_uri: str,
+    captured: datetime,
+    outcome: str,
+    kind: str,
+    artifacts: list[str],
+    decisions: list[str],
+    verifications: list[str],
+    sources: list[str],
+    confidence: str,
+    open_questions: list[str],
+):
+    adapter = mnemosyne_remember(personal_memory_summary(decisions), canonical_uri)
+    print(json.dumps({
+        "status": "handoff-required",
+        "scope": "personal",
+        "provider": "mnemosyne",
+        "adapter": adapter,
+        "canonical_uri": canonical_uri,
+        "origin_workspace": str(workspace),
+        "capture_key": key,
+        "record": {
+            "schema": CAPTURE_SCHEMA_VERSION,
+            "status": "pending-curation",
+            "supersedes": None,
+            "valid_from": captured.isoformat(),
+            "valid_until": None,
+        },
+        "payload": {
+            "outcome": outcome,
+            "kind": kind,
+            "artifacts": artifacts,
+            "decisions": redact_values(decisions),
+            "verification": redact_values(verifications),
+            "sources": redact_values(sources),
+            "confidence": confidence,
+            "open_questions": redact_values(open_questions),
+        },
+    }))
 
 
 def prior_items(content: str, heading: str) -> list[str]:
@@ -206,6 +647,7 @@ def capture(
     sources: list[str],
     confidence: str,
     open_questions: list[str],
+    scope: str = "auto",
 ):
     data = load()
     if not data.get("auto_capture"):
@@ -215,31 +657,53 @@ def capture(
         raise SystemExit("capture outcome is empty")
     route = json.loads(capture_resolve(cwd))
     workspace = Path(route["cwd"])
+    origin_workspace = workspace_identity(route, workspace)
+    scope = resolve_capture_scope(scope, route)
     safe_artifacts = safe_artifact_paths(artifacts)
-    if route["local_wiki"] and route["local_wiki_status"] == "valid":
-        destination = Path(route["local_wiki"]) / "inbox" / "autosave"
-    elif route["topic"] and (Path.home() / "wiki" / "topics" / route["topic"]).is_dir():
-        destination = Path.home() / "wiki" / "topics" / route["topic"] / "inbox" / "autosave"
-    else:
-        destination = Path.home() / "wiki" / ".sessions" / "autosave"
-    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     captured = datetime.now(timezone.utc)
     key = capture_key()
+    canonical_uri = canonical_capture_uri(scope, str(origin_workspace), key)
+    if scope == "personal":
+        personal_handoff(
+            origin_workspace,
+            key,
+            canonical_uri,
+            captured,
+            outcome,
+            kind,
+            safe_artifacts,
+            decisions,
+            verifications,
+            sources,
+            confidence,
+            open_questions,
+        )
+        return
+    destination = capture_destination(scope, route)
+    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     output = destination / f"session-{key}.md"
     previous = output.read_text() if output.exists() else ""
+    if previous:
+        capture_schema(previous)
     previous_confidence = re.search(r"^confidence: (.+)$", previous, re.M)
-    decisions = merge_items(prior_items(previous, "Decisions"), [redact(value) for value in decisions if redact(value)])
+    decisions = merge_items(prior_items(previous, "Decisions"), redact_values(decisions))
     artifacts = merge_items(prior_items(previous, "Artifacts"), [f"`{artifact}`" for artifact in safe_artifacts])
-    verifications = merge_items(prior_items(previous, "Verification"), [redact(value) for value in verifications if redact(value)])
-    sources = merge_items(prior_items(previous, "Sources"), [redact(value) for value in sources if redact(value)])
-    open_questions = merge_items(prior_items(previous, "Open questions"), [redact(value) for value in open_questions if redact(value)])
+    verifications = merge_items(prior_items(previous, "Verification"), redact_values(verifications))
+    sources = merge_items(prior_items(previous, "Sources"), redact_values(sources))
+    open_questions = merge_items(prior_items(previous, "Open questions"), redact_values(open_questions))
     confidence = highest_confidence(previous_confidence.group(1).strip() if previous_confidence else "unverified", confidence)
     content = f"""---
 type: autosave-capture
-schema: 1
+schema: {CAPTURE_SCHEMA_VERSION}
+scope: {scope}
+canonical_uri: {json.dumps(canonical_uri)}
+origin_workspace: {json.dumps(str(origin_workspace))}
 status: pending-curation
+supersedes: null
+valid_from: {captured.isoformat()}
+valid_until: null
 kind: {kind}
-workspace: {workspace}
+workspace: {origin_workspace}
 topic: {route['topic'] or 'unresolved'}
 capture_key: {key}
 captured: {captured.isoformat()}
@@ -273,14 +737,14 @@ confidence: {confidence}
 {lines(open_questions)}
 """
     quota = None
-    if route["local_wiki"] and route["local_wiki_status"] == "valid":
+    if scope == "workspace":
         existing_bytes = output.stat().st_size if output.exists() else 0
         projected = directory_bytes(Path(route["local_wiki"])) - existing_bytes + len(content.encode("utf-8"))
         quota = quota_status(data, Path(route["local_wiki"]), projected)
         if quota["level"] == "block" and len(content.encode("utf-8")) > 256 * 1024:
             raise SystemExit("workspace wiki quota blocks this large capture; run retention report and quarantine expired operational data")
     atomic_write(output, content)
-    print(json.dumps({"path": str(output), "topic": route["topic"], "status": "updated" if previous else "pending-curation", "quota": quota}))
+    print(json.dumps({"path": str(output), "topic": route["topic"], "scope": scope, "canonical_uri": canonical_uri, "status": "updated" if previous else "pending-curation", "quota": quota}))
 
 
 def source_slug(value: str) -> str:
@@ -317,14 +781,24 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str):
     destination = Path(route["local_wiki"]) / "raw"
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     output = destination / f"{source_slug(clean_title)}-{digest[:12]}.md"
+    origin_workspace = workspace_identity(route, Path(route["cwd"]))
+    canonical_uri = canonical_capture_uri("workspace", str(origin_workspace), f"source-{digest}")
     if not output.exists():
-        retrieved = datetime.now(timezone.utc).date().isoformat()
+        retrieved_at = datetime.now(timezone.utc)
+        retrieved = retrieved_at.date().isoformat()
         content = f"""---
 type: raw-source
 title: {clean_title}
 source_url: {source_url}
 retrieved: {retrieved}
 content_sha256: {digest}
+scope: workspace
+canonical_uri: {json.dumps(canonical_uri)}
+origin_workspace: {json.dumps(str(origin_workspace))}
+status: canonical
+supersedes: null
+valid_from: {retrieved_at.isoformat()}
+valid_until: null
 ---
 
 # {clean_title}
@@ -332,7 +806,136 @@ content_sha256: {digest}
 {body.rstrip()}
 """
         atomic_write(output, content)
-    print(json.dumps({"path": str(output), "status": "canonical-evidence", "source_url": source_url, "content_sha256": digest}))
+    print(json.dumps({"path": str(output), "status": "canonical-evidence", "canonical_uri": canonical_uri, "source_url": source_url, "content_sha256": digest}))
+
+
+def intent_gate(prompt: str) -> dict:
+    text = redact(str(prompt or "")).strip()
+    signals = [name for name, pattern in RETRIEVAL_SIGNALS.items() if pattern.search(text)]
+    tokens = []
+    for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower()):
+        if token not in RETRIEVAL_STOPWORDS and token not in tokens:
+            tokens.append(token)
+    return {"matched": bool(signals), "signals": signals, "query": " ".join(tokens[:24])}
+
+
+def retrieval_roots(root: Path, user: bool) -> list[Path]:
+    roots = [root / "wiki", root / "raw"]
+    if user:
+        topics = root / "topics"
+        if topics.is_dir():
+            roots.extend(topic / section for topic in sorted(topics.iterdir()) if topic.is_dir() for section in ("wiki", "raw"))
+    return [path for path in roots if path.is_dir()]
+
+
+def canonical_retrieval_record(path: Path, root: Path, source: str, tokens: list[str]):
+    try:
+        if path.stat().st_size > RETRIEVAL_MAX_FILE_BYTES:
+            return None
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None
+    fields = {}
+    if content.startswith("---\n"):
+        try:
+            fields = frontmatter_fields(content)
+        except SystemExit:
+            return None
+    if fields.get("status") != "canonical" or not valid_canonical_uri(fields.get("canonical_uri")):
+        return None
+    searchable = content.lower()
+    score = sum(searchable.count(token) for token in tokens)
+    if not score:
+        return None
+    body = content.split("\n---", 1)[1] if content.startswith("---\n") and "\n---" in content else content
+    match = next((re.search(re.escape(token), body, re.I) for token in tokens if re.search(re.escape(token), body, re.I)), None)
+    start = max(0, (match.start() if match else 0) - 120)
+    snippet = re.sub(r"\s+", " ", redact(body[start:])).strip()[:480]
+    title = fields.get("title") or next((heading.strip() for heading in re.findall(r"^#\s+(.+)$", body, re.M)), path.stem)
+    return {
+        "source": source,
+        "path": path.relative_to(root).as_posix(),
+        "title": redact(str(title))[:160],
+        "snippet": snippet,
+        "canonical_uri": fields["canonical_uri"],
+        "score": score,
+        "confidence": "canonical",
+    }
+
+
+def bounded_canonical_retrieval(root: Path, source: str, user: bool, tokens: list[str], limit: int, timeout: float) -> tuple[list[dict], str]:
+    deadline = time.monotonic() + timeout
+    results = []
+    seen = set()
+    for base in retrieval_roots(root, user):
+        try:
+            paths = base.rglob("*.md")
+            for path in paths:
+                if time.monotonic() >= deadline:
+                    return sorted(results, key=lambda item: (-item["score"], item["path"]))[:limit], "timeout"
+                resolved = path.resolve()
+                if resolved in seen or not resolved.is_relative_to(root):
+                    continue
+                seen.add(resolved)
+                record = canonical_retrieval_record(resolved, root, source, tokens)
+                if record:
+                    results.append(record)
+        except OSError:
+            continue
+    return sorted(results, key=lambda item: (-item["score"], item["path"]))[:limit], "ok"
+
+
+def trim_retrieval_results(results: list[dict], limit: int, max_bytes: int) -> list[dict]:
+    selected = []
+    used = 0
+    for result in results:
+        encoded = len(json.dumps(result, ensure_ascii=False).encode("utf-8"))
+        if len(selected) >= limit or used + encoded > max_bytes:
+            break
+        selected.append(result)
+        used += encoded
+    return selected
+
+
+def retrieve_memory(cwd: str, prompt: str, limit: int = RETRIEVAL_MAX_RESULTS, max_bytes: int = RETRIEVAL_MAX_BYTES, timeout: float = MNEMOSYNE_TIMEOUT_SECONDS) -> dict:
+    gate = intent_gate(prompt)
+    result = {"status": "abstained", "intent": gate, "results": [], "diagnostics": []}
+    if not gate["matched"] or not gate["query"]:
+        result["reason"] = "no-intent-signal"
+        return result
+    route = json.loads(capture_resolve(cwd))
+    tokens = gate["query"].split()
+    results = []
+    if route["local_wiki_status"] == "valid":
+        local_results, status = bounded_canonical_retrieval(Path(route["local_wiki"]), "workspace", False, tokens, limit, timeout)
+        results.extend(local_results)
+        result["diagnostics"].append({"source": "workspace", "status": status, "count": len(local_results)})
+    user_root = (Path.home() / "wiki").resolve()
+    if len(results) < limit and user_root.is_dir():
+        user_results, status = bounded_canonical_retrieval(user_root, "user", True, tokens, limit - len(results), timeout)
+        results.extend(user_results)
+        result["diagnostics"].append({"source": "user", "status": status, "count": len(user_results)})
+    if len(results) < limit:
+        memory = mnemosyne_recall(gate["query"], min(2, limit - len(results)), timeout)
+        result["diagnostics"].append({"source": "mnemosyne", **{key: value for key, value in memory.items() if key != "results" and key != "stdout"}})
+        for item in memory.get("results", []):
+            overlap = sum(token in item["content"].lower() for token in tokens)
+            if item.get("score", 0) < 0.2 and not overlap:
+                continue
+            results.append({
+                "source": "mnemosyne",
+                "path": None,
+                "title": "Private continuity hint",
+                "snippet": item["content"],
+                "canonical_uri": None,
+                "score": item.get("score", 0),
+                "confidence": "hint",
+            })
+    result["results"] = trim_retrieval_results(results, limit, max_bytes)
+    result["status"] = "ok" if result["results"] else "no-result"
+    if not result["results"]:
+        result["reason"] = "no-relevant-canonical-result"
+    return result
 
 
 def capture_resolve(cwd: str):
@@ -346,7 +949,8 @@ def capture_resolve(cwd: str):
         names = {candidate.name.lower().replace("_", "-") for candidate in (path, *path.parents)}
         candidates = sorted(topic for topic, metadata in data["topics"].items() if {topic, *metadata["aliases"]} & names)
         topic = candidates[0] if len(candidates) == 1 else None
-    return json.dumps({"cwd": str(path), "topic": topic, "local_wiki": str(local_root) if local_root else None, "local_wiki_status": wiki_status(local_root)})
+    workspace_root = local_root.parent if local_root else (max(matches, key=lambda item: len(item[0].parts))[0] if matches else None)
+    return json.dumps({"cwd": str(path), "topic": topic, "local_wiki": str(local_root) if local_root else None, "local_wiki_status": wiki_status(local_root), "workspace_root": str(workspace_root) if workspace_root else None})
 
 
 def map_workspace(cwd: str, topic: str):
@@ -393,6 +997,7 @@ def main():
     unmap_parser.add_argument("--confirm", action="store_true")
     capture_parser = commands.add_parser("capture")
     capture_parser.add_argument("--cwd", default=".")
+    capture_parser.add_argument("--scope", choices=["auto", "workspace", "user", "personal", "uncertain"], default="auto")
     capture_parser.add_argument("--outcome", required=True)
     capture_parser.add_argument("--kind", choices=["result", "decision", "research", "plan"], default="result")
     capture_parser.add_argument("--artifact", action="append", default=[])
@@ -406,6 +1011,17 @@ def main():
     canonicalize_parser.add_argument("--source", required=True)
     canonicalize_parser.add_argument("--source-url", required=True)
     canonicalize_parser.add_argument("--title", required=True)
+    transition_parser = commands.add_parser("transition")
+    transition_parser.add_argument("--cwd", default=".")
+    transition_parser.add_argument("--record", required=True)
+    transition_parser.add_argument("--status", choices=["canonical", "superseded", "retracted"], required=True)
+    transition_parser.add_argument("--supersedes")
+    retrieve_parser = commands.add_parser("retrieve")
+    retrieve_parser.add_argument("--cwd", default=".")
+    retrieve_parser.add_argument("--prompt", required=True)
+    retrieve_parser.add_argument("--limit", type=int, default=RETRIEVAL_MAX_RESULTS)
+    retrieve_parser.add_argument("--max-bytes", type=int, default=RETRIEVAL_MAX_BYTES)
+    retrieve_parser.add_argument("--timeout", type=float, default=MNEMOSYNE_TIMEOUT_SECONDS)
     commands.add_parser("validate")
     args = parser.parse_args()
     if args.command == "validate":
@@ -426,9 +1042,16 @@ def main():
             args.source,
             args.confidence,
             args.open_question,
+            args.scope,
         )
     elif args.command == "canonicalize":
         canonicalize(args.cwd, args.source, args.source_url, args.title)
+    elif args.command == "transition":
+        transition_record(args.cwd, args.record, args.status, args.supersedes)
+    elif args.command == "retrieve":
+        if not 1 <= args.limit <= RETRIEVAL_MAX_RESULTS or not 512 <= args.max_bytes <= RETRIEVAL_MAX_BYTES or not 0.1 <= args.timeout <= 10:
+            raise SystemExit("retrieval bounds are invalid")
+        print(json.dumps(retrieve_memory(args.cwd, args.prompt, args.limit, args.max_bytes, args.timeout), ensure_ascii=False))
     else:
         resolve(args.cwd)
 

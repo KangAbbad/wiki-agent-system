@@ -3,6 +3,11 @@ import hashlib, json, sys, os, re, subprocess, tempfile, time, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.dont_write_bytecode = True
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from wiki_ambient import CAPTURE_SCHEMA_VERSION, canonical_capture_uri, retrieve_memory
+
 SENSITIVE = re.compile(r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*", re.I)
 IGNORED_WORKSPACE_DIRS = {".git", ".wiki", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", ".next", ".cache"}
 WORKSPACE_SCHEMA_VERSION = 2
@@ -91,8 +96,52 @@ def ensure_sessions_ignored(root, cwd):
     except OSError:
         Path(temporary).unlink(missing_ok=True)
 
+
+def prompt_text(payload):
+    for key in ("prompt", "user_prompt", "user_message", "message"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value[:4000]
+    return ""
+
+
+def safe_retrieve(cwd, prompt):
+    try:
+        return retrieve_memory(str(cwd), prompt)
+    except (OSError, ValueError, SystemExit) as error:
+        return {
+            "status": "unavailable",
+            "intent": {"matched": False, "signals": [], "query": ""},
+            "results": [],
+            "diagnostics": [{"source": "retrieval", "status": "error", "reason": str(error)[:160]}],
+        }
+
+
+def retrieval_context(result):
+    if result is None:
+        return ""
+    lines = ["Bounded memory context: current instruction wins; Workspace Wiki > User Wiki > Mnemosyne hints."]
+    intent = result.get("intent", {})
+    if not intent.get("matched"):
+        lines.append("Memory retrieval: abstained; no continuation, prior-decision, research, architecture, or repeated-investigation signal.")
+    elif result.get("results"):
+        lines.append(f"Memory retrieval: {len(result['results'])} bounded result(s); status={result.get('status', 'ok')}.")
+        for item in result["results"]:
+            source = item.get("source", "unknown")
+            title = item.get("title", "Untitled")
+            snippet = item.get("snippet", "")
+            lines.append(f"- [{source}] {title}: {snippet}")
+    else:
+        lines.append(f"Memory retrieval: no relevant canonical result ({result.get('reason', 'no-result')}).")
+    diagnostics = [item for item in result.get("diagnostics", []) if item.get("status") not in {"ok", "stored"}]
+    if diagnostics:
+        lines.append("Memory diagnostics: " + "; ".join(f"{item.get('source', item.get('provider', 'unknown'))}={item.get('status', 'unknown')}" for item in diagnostics))
+    return "\n".join(lines)
+
 payload = json.load(sys.stdin) if not sys.stdin.isatty() else {}
 cwd = Path(payload.get("cwd") or payload.get("workspace_root") or ".").resolve()
+event = payload.get("hook_event_name", "SessionStart")
+prompt = prompt_text(payload)
 existing = next((p / ".wiki" for p in (cwd, *cwd.parents) if (p / ".wiki").is_dir()), None)
 root = existing
 if root and not all((root / item).exists() for item in ("config.md", "_index.md", "raw", "wiki")):
@@ -107,7 +156,6 @@ if root is None and cwd.is_dir():
 if root:
     ensure_sessions_ignored(root, cwd)
     marker = root / ".wiki-agent-system.json"
-    event = payload.get("hook_event_name", "SessionStart")
     marker_state = migrate_marker(marker)
     if marker_state in {"future", "invalid"}:
         detail = "newer" if marker_state == "future" else "invalid"
@@ -135,17 +183,24 @@ if root:
             started_at = None
         semantic = [path for path in captures.glob("*.md") if started_at and path.stat().st_mtime >= started_at]
         if message and started_at and not semantic and workspace_changed_since(cwd, started_at):
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            captured = datetime.now(timezone.utc)
+            stamp = captured.strftime("%Y%m%dT%H%M%SZ")
             output = captures / f"{stamp}-{uuid.uuid4().hex[:8]}-semantic-fallback.md"
+            capture_key = hashlib.sha256(f"{session_id}:{turn_id}".encode()).hexdigest()[:16]
+            origin_workspace = root.parent if root else cwd
+            canonical_uri = canonical_capture_uri("workspace", str(origin_workspace), capture_key)
             fd, temporary = tempfile.mkstemp(dir=captures, prefix=".capture-", text=True)
             with os.fdopen(fd, "w") as file:
-                file.write(f"---\ntype: semantic-stop-capture\nstatus: pending-curation\nworkspace: {cwd}\nsession_id: {session_id}\nturn_id: {turn_id}\nfallback: true\n---\n\n# Auto-saved final result\n\n## Outcome\n\n{message}\n\n## Decisions\n\n- Not extracted; review outcome during curation.\n\n## Artifacts\n\n- Not extracted; inspect workspace changes during curation.\n\n## Verification\n\n- Not extracted; review outcome during curation.\n")
+                file.write(f"---\ntype: semantic-stop-capture\nschema: {CAPTURE_SCHEMA_VERSION}\nscope: workspace\ncanonical_uri: {json.dumps(canonical_uri)}\norigin_workspace: {json.dumps(str(origin_workspace))}\nstatus: pending-curation\nsupersedes: null\nvalid_from: {captured.isoformat()}\nvalid_until: null\nworkspace: {origin_workspace}\nsession_id: {session_id}\nturn_id: {turn_id}\nfallback: true\n---\n\n# Auto-saved final result\n\n## Outcome\n\n{message}\n\n## Decisions\n\n- Not extracted; review outcome during curation.\n\n## Artifacts\n\n- Not extracted; inspect workspace changes during curation.\n\n## Verification\n\n- Not extracted; review outcome during curation.\n")
             os.chmod(temporary, 0o600)
             os.replace(temporary, output)
         state.unlink(missing_ok=True)
+    retrieval = safe_retrieve(cwd, prompt) if event == "UserPromptSubmit" else None
     policy = (Path(__file__).resolve().parents[1] / "defaults" / "policy.md").read_text().strip()
     index = (root / "_index.md").read_text()[:4000]
     captures = sorted((root / "inbox" / "autosave").glob("*.md"))[-3:]
-    recent = "\n\n".join(path.read_text()[:2000] for path in captures)
-    text = f"{policy}\nWorkspace knowledge index:\n{index}\nRecent captures:\n{recent}"
+    recent = "\n\n".join(path.read_text()[:2000] for path in captures) if not prompt or (retrieval and retrieval.get("intent", {}).get("matched")) else ""
+    recent_context = f"\nRecent captures:\n{recent}" if recent else ""
+    memory_context = f"\n{retrieval_context(retrieval)}" if retrieval and retrieval.get("intent", {}).get("matched") else ""
+    text = f"{policy}\nWorkspace knowledge index:\n{index}{memory_context}{recent_context}"
     print(json.dumps({"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name", "SessionStart"), "additionalContext": text}}))

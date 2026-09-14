@@ -15,11 +15,14 @@ grep -q '"pluginId": "wiki-preflight@wiki-agent-system"' "$root/list.json" || fa
 plugin=$(find "$CODEX_HOME/plugins/cache/wiki-agent-system/wiki-preflight" -path '*/hooks/preflight.py' -type f | head -n 1)
 test -n "$plugin" || fail "installed cache has no preflight hook"
 case "$plugin" in "$PWD"/*) fail "test used source tree instead of installed cache";; esac
+plugin_root=$(dirname "$(dirname "$plugin")")
+launcher="$plugin_root/launcher.sh"
+test -x "$launcher" || fail "installed cache has no launcher"
 
-printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$root/workspace" | python3 "$plugin" >"$root/start.json"
-printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"clean","turn_id":"one"}' "$root/workspace" | python3 "$plugin" >/dev/null
+printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$root/workspace" | "$launcher" "$plugin" >"$root/start.json"
+printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"clean","turn_id":"one"}' "$root/workspace" | "$launcher" "$plugin" >/dev/null
 printf 'changed\n' >"$root/workspace/changed.txt"
-printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"clean","turn_id":"one","last_assistant_message":"Completed clean-device verification"}' "$root/workspace" | python3 "$plugin" >"$root/stop.json"
+printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"clean","turn_id":"one","last_assistant_message":"Completed clean-device verification"}' "$root/workspace" | "$launcher" "$plugin" >"$root/stop.json"
 ! grep -q '"decision": "block"' "$root/stop.json" || fail "installed Stop hook interrupted user response"
 
 test -f "$root/workspace/.wiki/.wiki-agent-system.json" || fail "installed hook did not initialize workspace wiki"

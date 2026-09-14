@@ -26,7 +26,7 @@ Before any workspace task, read `.wiki/_index.md`, then indexes for recent captu
 
 If `.wiki/` exists, validate ownership before writing. A valid LLM Wiki has `config.md`, `_index.md`, `raw/`, and `wiki/`. A foreign/incomplete `.wiki/` is read-only to this system: do not initialize, lint-fix, or write into it; route capture to hub pending storage instead.
 
-Run `scripts/wiki_ambient.py resolve --cwd "$PWD"` before a wiki operation. Prefer a local `.wiki/`, then a workspace mapping, then a unique topic alias. For reads without a route, inspect relevant hub indexes. For explicit writes, create the topic from the workspace identity and register the mapping as part of the write. Ask only when multiple candidate topics remain.
+Run `"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" resolve --cwd "$PWD"` before a wiki operation. Prefer a local `.wiki/`, then a workspace mapping, then a unique topic alias. For reads without a route, inspect relevant hub indexes. For explicit writes, create the topic from the workspace identity and register the mapping as part of the write. Ask only when multiple candidate topics remain.
 
 ## Invariants
 
@@ -49,9 +49,15 @@ bundled `capture` command. Meaningful work means an implementation,
 investigation, research, plan, decision, verification, or changed artifact:
 
 ```sh
-python3 "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture --cwd "$PWD" \
-  --outcome "<what was completed>" --kind result --confidence unverified
+"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture --cwd "$PWD" \
+  --scope auto --outcome "<what was completed>" \
+  --kind result --confidence unverified
 ```
+
+Use `--scope workspace` for repository truth, `--scope user` for reusable
+cross-repository knowledge, and `--scope uncertain` for mixed or unresolved
+ownership. `--scope personal` returns a Mnemosyne handoff; it never writes to a
+Wiki. The Stop fallback remains workspace scope only.
 
 Add each applicable `--decision`, `--artifact`, `--verification`, `--source`,
 and `--open-question`. This is mandatory agent behavior, not a suggestion to
@@ -65,7 +71,7 @@ later calls add missing fields and replace the outcome with the final result.
 Captures route to the resolved topic's `inbox/autosave/`; unresolved work routes to the hub's operational `.sessions/autosave/` until a topic exists. Capture is preservation, not evidence. Auto-canonicalize only a supplied, attributable source; otherwise leave the capture pending curation.
 
 Canonical evidence requires source content, an absolute HTTP(S) provenance URL,
-a title, and a content hash. Use `wiki_ambient.py canonicalize` only after those
+a title, and a content hash. Use `"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" canonicalize` only after those
 fields are available; it writes the evidence to `raw/`. Never promote an
 autosave, unsourced claim, secret, or `.env` file.
 
@@ -87,3 +93,9 @@ For a Git workspace, the hook idempotently ignores `.wiki/.sessions/`. When an
 authorized commit includes related repository work, include the relevant durable
 `.wiki/` knowledge with it. Never stage or commit `.wiki/.sessions/`, and never
 create a commit unless the user authorizes it.
+
+User Wiki/configuration and Mnemosyne are private paths outside the repository;
+the plugin never stages or commits them. Mnemosyne is not automatically synced
+or shared with a team. If private environment roots resolve inside a Git
+repository, capture fails closed before writing them. Non-Git workspaces do not
+receive a `.gitignore`.

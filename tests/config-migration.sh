@@ -14,7 +14,7 @@ data["schema_version"] = 2
 data["retention"].pop("max_bytes")
 json.dump(data, open(sys.argv[2], "w"))
 PY
-XDG_CONFIG_HOME="$config_home" python3 "$plugin_root/scripts/wiki_ambient.py" validate >/dev/null
+XDG_CONFIG_HOME="$config_home" "$plugin_root/hooks/launcher.sh" "$plugin_root/scripts/wiki_ambient.py" validate >/dev/null
 python3 - "$config" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))

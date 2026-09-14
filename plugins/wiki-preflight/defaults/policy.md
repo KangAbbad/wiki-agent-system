@@ -14,7 +14,7 @@ task survives removal of the versioned plugin cache during a later upgrade.
 ## Semantic finalizer
 
 Before sending the final response for meaningful workspace work, run
-`python3 "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture --cwd "$PWD" --outcome
+`"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture --cwd "$PWD" --outcome
 "..."`. Meaningful work includes an implementation, investigation, research,
 plan, decision, verification, or changed artifact. Supply every applicable
 `--decision`, `--artifact`, `--verification`, `--source`, `--confidence`, and
