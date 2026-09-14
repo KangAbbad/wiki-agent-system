@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "enabled": true,
   "ambient_read": true,
   "suggest_writes": true,
@@ -28,9 +28,9 @@
     "max_bytes": 1073741824,
     "queue_days": 30,
     "state_days": 30,
-    "autosave_days": 90,
+    "autosave_days": 10,
     "digest_days": 180,
-    "trash_days": 30,
+    "trash_days": 7,
     "warn_percent": 70,
     "plan_percent": 85,
     "block_large_write_percent": 95

@@ -134,6 +134,277 @@ lifecycle_and_retention() (
   test -f "$workspace/.wiki/output/keep.md"
 )
 
+retention_default_days() (
+  set -eu
+  test_root=$(mktemp -d)
+  trap 'rm -rf "$test_root"' EXIT
+  cp -R "$root/plugins/wiki-preflight" "$test_root/plugin"
+  workspace="$test_root/workspace"
+  mkdir -p "$workspace/.wiki/raw" "$workspace/.wiki/wiki" "$workspace/.wiki/inbox/autosave" \
+    "$workspace/.wiki/.trash/autosave"
+  printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/config.md"
+  printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/_index.md"
+  printf '%s\n' 'expired autosave' >"$workspace/.wiki/inbox/autosave/old.md"
+  printf '%s\n' 'quarantined data' >"$workspace/.wiki/.trash/autosave/old.md"
+  touch -t 202001010000 "$workspace/.wiki/inbox/autosave/old.md"
+  touch -t 202001010000 "$workspace/.wiki/.trash/autosave/old.md"
+  report=$(XDG_CONFIG_HOME="$test_root/config" "$test_root/plugin/hooks/launcher.sh" \
+    "$test_root/plugin/scripts/retention.py" "$workspace" --apply)
+  printf '%s' "$report" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["purge"]["older_than_days"] == 7; assert not data["purge"]["enabled"]'
+  test -f "$workspace/.wiki/.trash/autosave/old.md"
+)
+
+scheduled_retention() (
+  set -eu
+  test_root=$(mktemp -d)
+  trap 'rm -rf "$test_root"' EXIT
+  cp -R "$root/plugins/wiki-preflight" "$test_root/plugin"
+  launcher="$test_root/plugin/hooks/launcher.sh"
+  hook="$test_root/plugin/hooks/preflight.py"
+  export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config"
+
+  make_wiki() {
+    workspace=$1
+    mkdir -p "$workspace/.wiki/raw" "$workspace/.wiki/wiki"
+    printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/config.md"
+    printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/_index.md"
+  }
+  expire() {
+    file=$1
+    printf '%s\n' expired >"$file"
+    touch -t 202001010000 "$file"
+  }
+  run_start() {
+    workspace=$1
+    printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"SessionStart\"}" | "$launcher" "$hook"
+  }
+
+  due="$test_root/due"
+  make_wiki "$due"
+  mkdir -p "$due/.wiki/inbox/autosave" "$due/.wiki/.sessions"
+  expire "$due/.wiki/inbox/autosave/old.md"
+  expire "$due/.wiki/.sessions/old.json"
+  run_start "$due" >/dev/null
+  test -f "$due/.wiki/.trash/autosave/old.md"
+  test -f "$due/.wiki/.trash/state/old.json"
+  test -f "$due/.wiki/.sessions/retention.json"
+  test ! -e "$due/.gitignore"
+
+  non_due="$test_root/non-due"
+  make_wiki "$non_due"
+  mkdir -p "$non_due/.wiki/inbox/autosave"
+  run_start "$non_due" >/dev/null
+  expire "$non_due/.wiki/inbox/autosave/old.md"
+  run_start "$non_due" >/dev/null
+  test -f "$non_due/.wiki/inbox/autosave/old.md"
+  test ! -e "$non_due/.wiki/.trash/autosave/old.md"
+
+  event="$test_root/event"
+  make_wiki "$event"
+  mkdir -p "$event/.wiki/inbox/autosave"
+  expire "$event/.wiki/inbox/autosave/old.md"
+  printf '%s' "{\"cwd\":\"$event\",\"hook_event_name\":\"UserPromptSubmit\"}" | "$launcher" "$hook" >/dev/null
+  test -f "$event/.wiki/inbox/autosave/old.md"
+  test ! -e "$event/.wiki/.trash/autosave/old.md"
+
+  locked="$test_root/locked"
+  make_wiki "$locked"
+  mkdir -p "$locked/.wiki/inbox/autosave" "$locked/.wiki/.sessions"
+  expire "$locked/.wiki/inbox/autosave/old.md"
+  lock="$locked/.wiki/.sessions/retention.lock"
+  ready="$test_root/lock-ready"
+  python3 - "$lock" "$ready" <<'PY' &
+import fcntl
+import os
+import sys
+import time
+
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(2)
+PY
+  holder=$!
+  while [ ! -f "$ready" ]; do sleep 0.01; done
+  run_start "$locked" >/dev/null
+  test -f "$locked/.wiki/inbox/autosave/old.md"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  malformed="$test_root/malformed"
+  make_wiki "$malformed"
+  mkdir -p "$malformed/.wiki/inbox/autosave" "$malformed/.wiki/.sessions"
+  printf '%s\n' '{"schema_version":99}' >"$malformed/.wiki/.sessions/retention.json"
+  expire "$malformed/.wiki/inbox/autosave/old.md"
+  before=$(cat "$malformed/.wiki/.sessions/retention.json")
+  run_start "$malformed" >/dev/null
+  test -f "$malformed/.wiki/inbox/autosave/old.md"
+  test "$(cat "$malformed/.wiki/.sessions/retention.json")" = "$before"
+
+  foreign="$test_root/foreign"
+  mkdir -p "$foreign/.wiki"
+  printf '%s\n' foreign >"$foreign/.wiki/marker"
+  run_start "$foreign" >/dev/null
+  test -f "$foreign/.wiki/marker"
+  test ! -e "$foreign/.wiki/.sessions"
+  test ! -e "$foreign/.wiki/.trash"
+
+  timeout_workspace="$test_root/timeout"
+  make_wiki "$timeout_workspace"
+  cat >"$test_root/plugin/scripts/retention.py" <<'PY'
+import time
+time.sleep(10)
+PY
+  run_start "$timeout_workspace" >/dev/null
+  CODEX_SESSION_ID=timeout "$launcher" "$test_root/plugin/scripts/wiki_ambient.py" capture \
+    --cwd "$timeout_workspace" --outcome 'capture remains available' --kind result >/dev/null
+  test -n "$(find "$timeout_workspace/.wiki/inbox/autosave" -type f -name 'session-*.md')"
+)
+
+storage_accounting() (
+  set -eu
+  test_root=$(mktemp -d)
+  trap 'rm -rf "$test_root"' EXIT
+  cp -R "$root/plugins/wiki-preflight" "$test_root/plugin"
+  launcher="$test_root/plugin/hooks/launcher.sh"
+  export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config"
+  workspace="$test_root/workspace"
+  mkdir -p "$workspace/.wiki/raw" "$workspace/.wiki/wiki" "$workspace/.wiki/output" \
+    "$workspace/.wiki/inbox/autosave" "$workspace/.wiki/.sessions" "$workspace/.wiki/.trash/autosave"
+  printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/config.md"
+  printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/_index.md"
+  printf '%s\n' canonical >"$workspace/.wiki/raw/keep.md"
+  printf '%s\n' canonical >"$workspace/.wiki/wiki/keep.md"
+  printf '%s\n' canonical >"$workspace/.wiki/output/keep.md"
+  printf '%s\n' active >"$workspace/.wiki/inbox/autosave/current.md"
+  printf '%s\n' quarantined >"$workspace/.wiki/.trash/autosave/old.md"
+  printf '%s\n' expired >"$workspace/.wiki/inbox/autosave/expired.md"
+  touch -t 202001010000 "$workspace/.wiki/raw/keep.md" "$workspace/.wiki/wiki/keep.md" \
+    "$workspace/.wiki/output/keep.md" "$workspace/.wiki/inbox/autosave/expired.md"
+
+  before=$("$launcher" "$test_root/plugin/scripts/retention.py" "$workspace" --max-bytes 1)
+  printf '%s' "$before" | python3 -c 'import json,sys; data=json.load(sys.stdin); storage=data["storage"]; paths=sum(data["expired_operational_files"].values(), []); assert storage["active_autosave_bytes"] > 0; assert storage["quarantine_bytes"] > 0; assert data["quota"]["used_bytes"] == storage["total_bytes"]; assert data["quota"]["basis"] == "total_bytes"; assert all(part not in path for path in paths for part in ("/raw/", "/wiki/", "/output/")); assert len(data["diagnostics"]) == 1'
+  before_total=$(printf '%s' "$before" | python3 -c 'import json,sys; print(json.load(sys.stdin)["storage"]["total_bytes"])')
+  apply=$("$launcher" "$test_root/plugin/scripts/retention.py" "$workspace" --apply --autosave-days 1 --state-days 1 --max-bytes 1)
+  after_total=$(printf '%s' "$apply" | python3 -c 'import json,sys; print(json.load(sys.stdin)["storage"]["total_bytes"])')
+  test "$before_total" = "$after_total"
+  test -f "$workspace/.wiki/.trash/autosave/expired.md"
+  test -f "$workspace/.wiki/raw/keep.md"
+  test -f "$workspace/.wiki/wiki/keep.md"
+  test -f "$workspace/.wiki/output/keep.md"
+
+  capture=$("$launcher" "$test_root/plugin/scripts/wiki_ambient.py" capture --cwd "$workspace" \
+    --outcome 'bounded storage capture' --kind result)
+  printf '%s' "$capture" | python3 -c 'import json,sys; data=json.load(sys.stdin); quota=data["quota"]; storage=quota["storage"]; assert quota["used_bytes"] == storage["total_bytes"]; assert quota["basis"] == "total_bytes"; assert storage["quarantine_bytes"] > 0; assert len(quota["diagnostics"]) == 1; assert len(json.dumps(data).encode()) < 4000'
+)
+
+purge_policy() (
+  set -eu
+  test_root=$(mktemp -d)
+  trap 'rm -rf "$test_root"' EXIT
+  cp -R "$root/plugins/wiki-preflight" "$test_root/plugin"
+  launcher="$test_root/plugin/hooks/launcher.sh"
+  retention="$test_root/plugin/scripts/retention.py"
+  export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config"
+
+  make_wiki() {
+    workspace=$1
+    mkdir -p "$workspace/.wiki/raw" "$workspace/.wiki/wiki" "$workspace/.wiki/output" \
+      "$workspace/.wiki/inbox/autosave" "$workspace/.wiki/.sessions" \
+      "$workspace/.wiki/.trash/autosave" "$workspace/.wiki/.trash/state"
+    printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/config.md"
+    printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/_index.md"
+  }
+
+  workspace="$test_root/workspace"
+  make_wiki "$workspace"
+  printf '%s\n' canonical >"$workspace/.wiki/raw/keep.md"
+  printf '%s\n' canonical >"$workspace/.wiki/wiki/keep.md"
+  printf '%s\n' canonical >"$workspace/.wiki/output/keep.md"
+  printf '%s\n' active >"$workspace/.wiki/inbox/autosave/active.md"
+  printf '%s\n' recent >"$workspace/.wiki/.trash/autosave/recent.md"
+  printf '%s\n' old >"$workspace/.wiki/.trash/autosave/old.md"
+  printf '%s\n' old-state >"$workspace/.wiki/.trash/state/old.json"
+  touch -t 202001010000 "$workspace/.wiki/inbox/autosave/active.md" \
+    "$workspace/.wiki/.trash/autosave/old.md" "$workspace/.wiki/.trash/state/old.json" \
+    "$workspace/.wiki/raw/keep.md" "$workspace/.wiki/wiki/keep.md" "$workspace/.wiki/output/keep.md"
+
+  report=$("$launcher" "$retention" "$workspace" --apply --scheduled \
+    --autosave-days 1 --state-days 1)
+  printf '%s' "$report" | python3 -c 'import json,sys; data=json.load(sys.stdin); purge=data["purge"]; summary=purge["summary"]; assert purge["enabled"]; assert purge["older_than_days"] == 7; assert summary["files"] == 2; assert summary["bytes"] > 0; assert summary["errors"] == 0; assert summary["by_category"]["autosave"]["files"] == 1; assert summary["by_category"]["state"]["files"] == 1; assert "path" not in json.dumps(purge); assert len(json.dumps(purge).encode()) < 1000'
+  test ! -e "$workspace/.wiki/.trash/autosave/old.md"
+  test ! -e "$workspace/.wiki/.trash/state/old.json"
+  test -f "$workspace/.wiki/.trash/autosave/active.md"
+  test -f "$workspace/.wiki/.trash/autosave/recent.md"
+  test ! -e "$workspace/.wiki/inbox/autosave/active.md"
+  test -f "$workspace/.wiki/raw/keep.md"
+  test -f "$workspace/.wiki/wiki/keep.md"
+  test -f "$workspace/.wiki/output/keep.md"
+
+  locked="$test_root/locked"
+  make_wiki "$locked"
+  printf '%s\n' locked >"$locked/.wiki/.trash/autosave/old.md"
+  touch -t 202001010000 "$locked/.wiki/.trash/autosave/old.md"
+  printf '%s\n' '{"schema_version":1,"last_run_at":0}' >"$locked/.wiki/.sessions/retention.json"
+  lock="$locked/.wiki/.sessions/retention.lock"
+  ready="$test_root/purge-lock-ready"
+  python3 - "$lock" "$ready" <<'PY' &
+import fcntl
+import os
+import sys
+import time
+
+fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(2)
+PY
+  holder=$!
+  while [ ! -f "$ready" ]; do sleep 0.01; done
+  locked_report=$("$launcher" "$retention" "$locked" --apply --scheduled --trash-days 7)
+  printf '%s' "$locked_report" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["skip_reason"] == "lock-timeout"; assert data["purge"]["summary"]["files"] == 0'
+  test -f "$locked/.wiki/.trash/autosave/old.md"
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  outside="$test_root/outside"
+  mkdir -p "$outside"
+  printf '%s\n' outside >"$outside/keep.md"
+  symlinked="$test_root/symlinked"
+  make_wiki "$symlinked"
+  rmdir "$symlinked/.wiki/.trash/state"
+  ln -s "$outside" "$symlinked/.wiki/.trash/state"
+  symlink_report=$("$launcher" "$retention" "$symlinked" --apply --scheduled --trash-days 7)
+  printf '%s' "$symlink_report" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["purge"]["summary"]["files"] == 0; assert data["purge"]["summary"]["errors"] == 1'
+  test -f "$outside/keep.md"
+
+  python3 - "$retention" "$test_root/utime-failure" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("retention", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+workspace = Path(sys.argv[2])
+source = workspace / ".wiki/inbox/autosave/old.md"
+source.parent.mkdir(parents=True)
+source.write_text("preserve restore window\n")
+original = module.os.utime
+module.os.utime = lambda *_: (_ for _ in ()).throw(OSError("injected"))
+try:
+    try:
+        module.quarantine(workspace / ".wiki", {"autosave": [source], "state": []})
+    except OSError:
+        pass
+finally:
+    module.os.utime = original
+assert source.is_file()
+assert not (workspace / ".wiki/.trash/autosave/old.md").exists()
+PY
+)
+
 adapter_and_retrieval() (
   set -e
   test_root=$(mktemp -d)
@@ -565,9 +836,13 @@ check 'user-scope configuration migration' sh "$root/tests/config-migration.sh" 
 check 'agent-side semantic finalizer contract' sh "$root/tests/semantic-finalizer.sh" "$root/plugins/wiki-preflight"
 check 'per-task semantic capture deduplication' sh "$root/tests/capture-dedup.sh" "$root/plugins/wiki-preflight"
 check 'quota report and operational-data quarantine' sh "$root/tests/quota-retention.sh" "$root/plugins/wiki-preflight"
+check 'scheduled, locked, fail-open retention' scheduled_retention
+check 'truthful storage accounting and diagnostics' storage_accounting
+check 'authorized quarantine purge and restore boundaries' purge_policy
 check 'stable hook runtime survives removed plugin cache' sh "$root/tests/stable-hook-runtime.sh" "$root/plugins/wiki-preflight"
 check 'semantic capture and evidence gate' semantic_and_evidence
 check 'evidence lifecycle and canonical retention' lifecycle_and_retention
+check 'default autosave retention is 10 days' retention_default_days
 check 'optional Mnemosyne adapter and bounded retrieval' adapter_and_retrieval
 check 'capture contract and forward compatibility' capture_contract
 check 'deterministic scope routing' scope_routing

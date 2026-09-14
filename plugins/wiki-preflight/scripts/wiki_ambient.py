@@ -21,7 +21,7 @@ sys.dont_write_bytecode = True
 
 CONFIG_TEMPLATE = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
 USER_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-wiki" / "wiki-agent-system.json"
-AMBIENT_SCHEMA_VERSION = 3
+AMBIENT_SCHEMA_VERSION = 4
 CAPTURE_SCHEMA_VERSION = 2
 CAPTURE_SCOPES = frozenset({"workspace", "user", "personal", "uncertain"})
 LIFECYCLE_STATES = frozenset({"pending-curation", "canonical", "superseded", "retracted"})
@@ -115,6 +115,15 @@ def load():
     if data.get("schema_version") == 2:
         data["schema_version"] = 3
         migrated = True
+    if data.get("schema_version") == 3:
+        retention = data.get("retention")
+        if isinstance(retention, dict):
+            if retention.get("trash_days") == 30:
+                retention["trash_days"] = 7
+            elif "trash_days" not in retention:
+                retention["trash_days"] = 7
+        data["schema_version"] = 4
+        migrated = True
     if isinstance(data.get("retention"), dict) and "max_bytes" not in data["retention"]:
         data["retention"]["max_bytes"] = 1073741824
         migrated = True
@@ -135,6 +144,8 @@ def load():
         not isinstance(retention, dict)
         or not isinstance(retention.get("max_bytes"), int)
         or retention["max_bytes"] <= 0
+        or not isinstance(retention.get("trash_days"), int)
+        or retention["trash_days"] <= 0
         or any(not isinstance(retention.get(name), int) or not 0 < retention[name] <= 100 for name in ("warn_percent", "plan_percent", "block_large_write_percent"))
         or not retention["warn_percent"] < retention["plan_percent"] < retention["block_large_write_percent"]
     ):
@@ -609,20 +620,40 @@ def highest_confidence(previous: str, current: str) -> str:
     return max((previous, current), key=lambda value: levels.get(value, 0))
 
 
-def directory_bytes(root: Path) -> int:
-    total = 0
+def storage_report(root: Path) -> dict:
+    active = quarantine = total = 0
+    if not root.exists() or root.is_symlink():
+        return {"active_autosave_bytes": active, "quarantine_bytes": quarantine, "total_bytes": total}
     for path in root.rglob("*"):
         try:
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
+            if path.is_symlink() or not path.is_file():
+                continue
+            size = path.stat().st_size
+            relative = path.relative_to(root)
+            total += size
+            if relative.parts[:2] == ("inbox", "autosave"):
+                active += size
+            elif relative.parts[:1] == (".trash",):
+                quarantine += size
         except OSError:
             continue
-    return total
+    return {"active_autosave_bytes": active, "quarantine_bytes": quarantine, "total_bytes": total}
 
 
-def quota_status(data: dict, root: Path, projected_bytes=None) -> dict:
+def storage_diagnostics(storage: dict) -> list[dict]:
+    if not storage["quarantine_bytes"]:
+        return []
+    return [{
+        "code": "quarantine-counts-toward-quota",
+        "message": "Quarantine does not reclaim disk: quarantined files remain on disk and count toward the total Wiki quota.",
+        "quarantine_bytes": storage["quarantine_bytes"],
+    }]
+
+
+def quota_status(data: dict, root: Path, projected_bytes=None, storage=None) -> dict:
     retention = data["retention"]
-    used = directory_bytes(root)
+    storage = storage or storage_report(root)
+    used = storage["total_bytes"]
     projected = used if projected_bytes is None else projected_bytes
     max_bytes = retention["max_bytes"]
     percent = projected * 100 / max_bytes
@@ -634,7 +665,16 @@ def quota_status(data: dict, root: Path, projected_bytes=None) -> dict:
         level = "warn"
     else:
         level = "normal"
-    return {"level": level, "used_bytes": used, "projected_bytes": projected, "max_bytes": max_bytes, "percent": round(percent, 2)}
+    return {
+        "level": level,
+        "used_bytes": used,
+        "projected_bytes": projected,
+        "max_bytes": max_bytes,
+        "percent": round(percent, 2),
+        "basis": "total_bytes",
+        "storage": storage,
+        "diagnostics": storage_diagnostics(storage),
+    }
 
 
 def capture(
@@ -739,8 +779,9 @@ confidence: {confidence}
     quota = None
     if scope == "workspace":
         existing_bytes = output.stat().st_size if output.exists() else 0
-        projected = directory_bytes(Path(route["local_wiki"])) - existing_bytes + len(content.encode("utf-8"))
-        quota = quota_status(data, Path(route["local_wiki"]), projected)
+        storage = storage_report(Path(route["local_wiki"]))
+        projected = storage["total_bytes"] - existing_bytes + len(content.encode("utf-8"))
+        quota = quota_status(data, Path(route["local_wiki"]), projected, storage)
         if quota["level"] == "block" and len(content.encode("utf-8")) > 256 * 1024:
             raise SystemExit("workspace wiki quota blocks this large capture; run retention report and quarantine expired operational data")
     atomic_write(output, content)

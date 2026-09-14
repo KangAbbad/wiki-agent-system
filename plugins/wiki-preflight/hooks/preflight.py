@@ -97,6 +97,22 @@ def ensure_sessions_ignored(root, cwd):
         Path(temporary).unlink(missing_ok=True)
 
 
+def run_scheduled_retention(root):
+    """Best-effort maintenance; retention must never block a hook event."""
+    script = Path(__file__).resolve().parents[1] / "scripts" / "retention.py"
+    try:
+        subprocess.run(
+            [sys.executable, str(script), str(root.parent), "--apply", "--scheduled"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=1.5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return
+
+
 def prompt_text(payload):
     for key in ("prompt", "user_prompt", "user_message", "message"):
         value = payload.get(key)
@@ -161,6 +177,8 @@ if root:
         detail = "newer" if marker_state == "future" else "invalid"
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": f"Workspace Wiki Agent System schema is {detail}; do not modify it until a compatible plugin is installed."}}))
         raise SystemExit(0)
+    if event == "SessionStart":
+        run_scheduled_retention(root)
     if event == "UserPromptSubmit":
         state = finalizer_state(root, payload)
         state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

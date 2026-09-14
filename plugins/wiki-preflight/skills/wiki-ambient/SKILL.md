@@ -71,9 +71,10 @@ Otherwise, leave the capture pending.
 ## Retention and document placement
 
 Apply retention only to operational session data: queue/state after 30 days,
-pending autosaves after 90 days, and unpromoted digests after 180 days. First
-create a storage report and quarantine plan; never auto-delete canonical `raw/`,
-`wiki/`, or topic `output/`.
+pending autosaves after 10 days, and unpromoted digests after 180 days. Expired
+autosaves/state move to quarantine; only `.trash/autosave/` and `.trash/state/`
+are permanently purged after 7 days during scheduled maintenance. Never
+auto-delete canonical `raw/`, `wiki/`, or topic `output/`.
 
 Classify document content, not the word "docs". Research, decisions, system
 previews, plans, reports, captures, and knowledge artifacts belong in wiki

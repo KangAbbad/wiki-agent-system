@@ -79,7 +79,7 @@ For mixed or low-confidence scope, preserve a pending capture automatically and 
 
 ## Retention
 
-Apply retention only to operational session data: queue/state after 30 days, pending autosaves after 90 days, and unpromoted digests after 180 days. First create a storage report and quarantine plan; canonical `raw/`, `wiki/`, and topic output are excluded from automatic deletion. Archive does not reclaim disk by itself.
+Apply retention only to operational session data: queue/state after 30 days, pending autosaves after 10 days, and unpromoted digests after 180 days. Expired autosaves/state move to quarantine; only `.trash/autosave/` and `.trash/state/` are permanently purged after 7 days during scheduled maintenance. Canonical `raw/`, `wiki/`, and topic output are excluded from automatic deletion.
 Quota measures the local `.wiki/` against the user-scope `max_bytes` setting;
 the retention command reads the same user-scope policy.
 
