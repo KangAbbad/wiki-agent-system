@@ -15,7 +15,7 @@ grep -q '"pluginId": "wiki-preflight@wiki-agent-system"' "$root/list.json" || fa
 plugin=$(find "$CODEX_HOME/plugins/cache/wiki-agent-system/wiki-preflight" -path '*/hooks/preflight.py' -type f | head -n 1)
 test -n "$plugin" || fail "installed cache has no preflight hook"
 case "$plugin" in "$PWD"/*) fail "test used source tree instead of installed cache";; esac
-plugin_root=$(dirname "$(dirname "$plugin")")
+plugin_root=$(dirname "$plugin")
 launcher="$plugin_root/launcher.sh"
 test -x "$launcher" || fail "installed cache has no launcher"
 

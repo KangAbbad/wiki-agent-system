@@ -16,7 +16,7 @@ preflight=$(find "$CODEX_HOME/plugins/cache/wiki-agent-system/wiki-preflight" -p
 upstream=$(find "$CODEX_HOME/plugins/cache/llm-wiki/wiki" -path '*/hooks/llm_wiki_session.py' -type f | head -n 1)
 test -n "$preflight" || fail "wiki-preflight hook missing after Git installation"
 test -n "$upstream" || fail "wiki@llm-wiki hook missing after Git installation"
-preflight_root=$(dirname "$(dirname "$preflight")")
+preflight_root=$(dirname "$preflight")
 preflight_launcher="$preflight_root/launcher.sh"
 test -x "$preflight_launcher" || fail "wiki-preflight launcher missing after Git installation"
 
