@@ -7,10 +7,18 @@ sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from wiki_ambient import CAPTURE_SCHEMA_VERSION, canonical_capture_uri, retrieve_memory
+from youtube_fallback import canonical_video, safe_text
 
 SENSITIVE = re.compile(r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*", re.I)
 IGNORED_WORKSPACE_DIRS = {".git", ".wiki", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", ".next", ".cache"}
 WORKSPACE_SCHEMA_VERSION = 2
+YOUTUBE_URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+")
+YOUTUBE_ACTION_PATTERN = re.compile(
+    r"\b(?:analy[sz]e|analisis|caption|cite|ingest|knowledge|kutip|pelajari|rangkum|research|riset|scrap(?:e|ing)?|subtitle|summar(?:ize|ise|y|izing|ising)|transcript|transkrip)\b",
+    re.I,
+)
+YOUTUBE_PREFLIGHT_MAX_URLS = 2
+YOUTUBE_PREFLIGHT_TIMEOUT = 16
 
 def atomic_json_write(path, data):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -121,6 +129,89 @@ def prompt_text(payload):
     return ""
 
 
+def youtube_prompt_urls(prompt):
+    if not prompt or not YOUTUBE_ACTION_PATTERN.search(prompt):
+        return []
+    urls = []
+    for match in YOUTUBE_URL_PATTERN.finditer(prompt):
+        candidate = match.group(0).rstrip(".,;:!?)]}")
+        try:
+            _, canonical = canonical_video(candidate)
+        except ValueError:
+            continue
+        if canonical not in urls:
+            urls.append(canonical)
+    return urls
+
+
+def youtube_preflight_context(root, cwd, prompt):
+    urls = youtube_prompt_urls(prompt)
+    if not urls:
+        return ""
+
+    helper = Path(__file__).resolve().parents[1] / "scripts" / "youtube_fallback.py"
+    output_dir = root / "inbox" / "youtube" if root else None
+    lines = ["YouTube automatic fallback preflight (bounded; no installer approval supplied):"]
+    for url in urls[:YOUTUBE_PREFLIGHT_MAX_URLS]:
+        command = [
+            sys.executable,
+            str(helper),
+            "captions",
+            url,
+            "--attempts",
+            "1",
+            "--backoff",
+            "0",
+            "--timeout",
+            "12",
+        ]
+        if output_dir:
+            command.extend(("--output-dir", str(output_dir)))
+        try:
+            result = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=YOUTUBE_PREFLIGHT_TIMEOUT,
+                check=False,
+                cwd=str(cwd),
+            )
+        except subprocess.TimeoutExpired:
+            lines.append(f"- {url}: status=hook-timeout; files=0")
+            continue
+        except OSError:
+            lines.append(f"- {url}: status=hook-unavailable; files=0")
+            continue
+
+        data = None
+        for line in reversed((result.stdout or "").splitlines()):
+            try:
+                candidate = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                data = candidate
+                break
+        if data is None:
+            lines.append(f"- {url}: status=hook-error; files=0; exit={result.returncode}")
+            continue
+
+        status = safe_text(str(data.get("status") or "unknown"), 80)
+        files = data.get("files") if isinstance(data.get("files"), list) else []
+        lines.append(f"- {url}: status={status}; files={len(files)}")
+        if files:
+            rendered = "; ".join(safe_text(str(path), 500) for path in files[:8])
+            lines.append(f"  caption_files={rendered}")
+        if status == "install-approval-required":
+            lines.append("  installation=blocked; request explicit approval before using --approve-install")
+
+    if len(urls) > YOUTUBE_PREFLIGHT_MAX_URLS:
+        lines.append(f"- skipped={len(urls) - YOUTUBE_PREFLIGHT_MAX_URLS} additional YouTube URL(s); process them on demand.")
+    lines.append("Only listed new caption files are evidence; no-captions and stale-captions-ignored are not fresh transcripts.")
+    return "\n".join(lines)
+
+
 def safe_retrieve(cwd, prompt):
     try:
         return retrieve_memory(str(cwd), prompt)
@@ -214,11 +305,13 @@ if root:
             os.replace(temporary, output)
         state.unlink(missing_ok=True)
     retrieval = safe_retrieve(cwd, prompt) if event == "UserPromptSubmit" else None
+    youtube_context = youtube_preflight_context(root, cwd, prompt) if event == "UserPromptSubmit" else ""
     policy = (Path(__file__).resolve().parents[1] / "defaults" / "policy.md").read_text().strip()
     index = (root / "_index.md").read_text()[:4000]
     captures = sorted((root / "inbox" / "autosave").glob("*.md"))[-3:]
     recent = "\n\n".join(path.read_text()[:2000] for path in captures) if not prompt or (retrieval and retrieval.get("intent", {}).get("matched")) else ""
     recent_context = f"\nRecent captures:\n{recent}" if recent else ""
     memory_context = f"\n{retrieval_context(retrieval)}" if retrieval and retrieval.get("intent", {}).get("matched") else ""
-    text = f"{policy}\nWorkspace knowledge index:\n{index}{memory_context}{recent_context}"
+    youtube_context = f"\n{youtube_context}" if youtube_context else ""
+    text = f"{policy}\nWorkspace knowledge index:\n{index}{memory_context}{youtube_context}{recent_context}"
     print(json.dumps({"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name", "SessionStart"), "additionalContext": text}}))

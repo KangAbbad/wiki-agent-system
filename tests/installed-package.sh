@@ -5,6 +5,10 @@ trap 'rm -rf "$root"' EXIT
 cp -R plugins/wiki-preflight "$root/plugin"
 test -f "$root/plugin/skills/wiki-ambient/SKILL.md"
 grep -q 'projectless work' "$root/plugin/skills/wiki-ambient/SKILL.md"
+test -x "$root/plugin/scripts/youtube_fallback.py"
+"$root/plugin/hooks/launcher.sh" "$root/plugin/scripts/youtube_fallback.py" self-test >/dev/null
+grep -q 'install-approval-required' "$root/plugin/defaults/policy.md"
+grep -q '"timeout": 45' "$root/plugin/hooks/hooks.json"
 mkdir "$root/workspace"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"SessionStart\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 test -f "$root/workspace/.wiki/.wiki-agent-system.json"

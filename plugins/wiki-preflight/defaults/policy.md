@@ -40,3 +40,59 @@ For a Git workspace, the hook ensures the local wiki runtime directory
 repository work, include the relevant durable `.wiki/` knowledge with it; never
 stage or commit `.wiki/.sessions/`. Do not create commits without user
 authorization.
+
+## YouTube evidence fallback
+
+For a prompt that asks to research, ingest, summarize, cite, or transcribe a
+YouTube video, the `UserPromptSubmit` hook automatically invokes the bundled
+helper for at most two canonical video URLs. It uses one short attempt per URL,
+does not install anything, and writes only fresh manual or automatic VTT
+captions to the current valid Wiki's `inbox/youtube/` directory. The hook injects
+the helper's JSON status and new file paths into the agent context, so a missing
+transcript is not treated as the end of extraction.
+
+For an explicit on-demand retry, use:
+
+```sh
+"$PLUGIN_DATA/current/hooks/launcher.sh" \
+  "$PLUGIN_DATA/current/scripts/youtube_fallback.py" captions "VIDEO_URL" \
+  --output-dir .wiki/inbox/youtube
+```
+
+If the result is `install-approval-required`, ask for approval in the current
+execution before rerunning with `--approve-install`:
+
+```sh
+"$PLUGIN_DATA/current/hooks/launcher.sh" \
+  "$PLUGIN_DATA/current/scripts/youtube_fallback.py" captions "VIDEO_URL" \
+  --approve-install --output-dir .wiki/inbox/youtube
+```
+
+The approved installer uses the current Python interpreter's user site and the
+exact package pin `yt-dlp==2026.08.19`; it does not run Homebrew or an unpinned
+package install. If Python's user-site installation is unavailable, fail loudly
+and let the user install the pinned package through their device policy.
+
+The helper accepts only one YouTube video per invocation, canonicalizes the URL,
+validates a 5–600 second process timeout, retries up to three times with bounded
+backoff, and never downloads the video. `no-captions` means no new caption file
+was produced. `stale-captions-ignored` means matching files already existed and
+were deliberately excluded; neither status is a transcript. If no captions are
+available, continue with audio-to-STT only when media extraction is allowed and
+label that evidence `machine-transcription`. If all routes fail, preserve
+`metadata-only` and never invent transcript content.
+
+When `yt-dlp` exits non-zero, any new or changed VTT from that attempt is removed
+before retry or return. Unchanged pre-existing VTT files are not evidence and are
+reported only as ignored stale files. Caption entries are inspected with lexical
+metadata; symlinks are rejected as evidence and only the link directly under
+the active output directory may be removed.
+
+`--output-dir` is restricted to the active valid Wiki's `.wiki/inbox/youtube/`
+directory or a child directory. Arbitrary paths and other Wiki roots return
+`invalid-input` before any directory is created.
+
+Do not pass browser cookies, credentials, or arbitrary non-YouTube URLs to the
+helper. Do not use it to bypass login, paywall, anti-bot, region, quota, or other
+access controls. Record the helper's JSON status and caption file paths in the
+Wiki evidence provenance.

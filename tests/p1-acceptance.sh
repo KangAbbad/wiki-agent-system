@@ -852,6 +852,7 @@ check 'user configuration future-schema protection' config_forward_migration
 check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-preflight"
 check 'source clean-device smoke test' from_root sh tests/clean-device.sh
 check 'installed-package smoke test' from_root sh tests/installed-package.sh
+check 'YouTube caption fallback' from_root sh tests/youtube-fallback.sh
 check 'live coexistence test' from_root sh tests/live-coexistence.sh
 check 'Git marketplace clean-device test' from_root sh tests/git-marketplace-clean-device.sh
 check 'launcher-only plugin runtime' launcher_only_runtime

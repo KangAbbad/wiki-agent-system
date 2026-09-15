@@ -1,1 +1,40 @@
-{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"\"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_ROOT/hooks/provision.py\" >/dev/null 2>&1 || true; \"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_DATA/current/hooks/preflight.py\"","timeout":5,"statusMessage":"Loading workspace knowledge"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"\"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_ROOT/hooks/provision.py\" >/dev/null 2>&1 || true; \"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_DATA/current/hooks/preflight.py\"","timeout":5,"statusMessage":"Loading workspace knowledge"}]}],"Stop":[{"hooks":[{"type":"command","command":"\"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_ROOT/hooks/provision.py\" >/dev/null 2>&1 || true; \"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_DATA/current/hooks/preflight.py\"","timeout":5,"statusMessage":"Saving workspace knowledge capture"}]}]}}
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_ROOT/hooks/provision.py\" >/dev/null 2>&1 || true; \"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_DATA/current/hooks/preflight.py\"",
+            "timeout": 5,
+            "statusMessage": "Loading workspace knowledge"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_ROOT/hooks/provision.py\" >/dev/null 2>&1 || true; \"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_DATA/current/hooks/preflight.py\"",
+            "timeout": 45,
+            "statusMessage": "Loading workspace knowledge and YouTube captions"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_ROOT/hooks/provision.py\" >/dev/null 2>&1 || true; \"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_DATA/current/hooks/preflight.py\"",
+            "timeout": 5,
+            "statusMessage": "Saving workspace knowledge capture"
+          }
+        ]
+      }
+    ]
+  }
+}
