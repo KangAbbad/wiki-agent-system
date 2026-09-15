@@ -37,22 +37,13 @@ Python starts.
 
 ## Structured capture
 
-Use the bundled finalizer after meaningful work. It writes an atomic,
-redacted, pending-curation record; it does not make unsupported claims
-canonical.
-
-```bash
-"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture \
-  --cwd "$PWD" \
-  --outcome "Implemented webhook verification" \
-  --kind result \
-  --artifact src/webhook.ts \
-  --decision "Verify signed payload before parsing" \
-  --verification "bun run typecheck" \
-  --source "https://example.com/official-spec" \
-  --confidence high \
-  --open-question "Add replay protection?"
-```
+Use the bundled finalizer after meaningful work through the installed plugin's
+stable launcher contract. It writes an atomic, redacted, pending-curation
+record; it does not make unsupported claims canonical. The runtime owns the
+launcher path, so agents and users should not paste a runtime shell command
+into a normal terminal. Supply the outcome plus applicable kind, artifacts,
+decisions, verifications, sources, confidence, and open questions through the
+plugin's capture interface.
 
 Outcome is required. Optional fields: decisions, workspace-relative artifacts,
 verification, attributable sources, confidence, and open questions.

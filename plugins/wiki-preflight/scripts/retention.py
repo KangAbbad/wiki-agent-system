@@ -26,7 +26,7 @@ STATE_FILENAME = "retention.json"
 LOCK_FILENAME = "retention.lock"
 
 config_path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-wiki" / "wiki-agent-system.json"
-defaults = {"autosave_days": 10, "state_days": 30, "trash_days": 7, "max_bytes": 1073741824}
+defaults = {"autosave_days": 10, "queue_days": 30, "state_days": 30, "trash_days": 7, "max_bytes": 1073741824}
 if config_path.exists():
     try:
         retention = json.loads(config_path.read_text())["retention"]
@@ -177,11 +177,20 @@ def destination_for(trash: Path, category: str, relative: Path) -> Path:
     return destination
 
 
-def operational_files(wiki: Path, autosave_days: int, state_days: int, state_path: Path, lock_path: Path):
+def operational_files(wiki: Path, autosave_days: int, queue_days: int, state_days: int, state_path: Path, lock_path: Path):
     excluded = {state_path, lock_path}
+    queue_root = wiki / ".sessions" / "wiki-agent-system" / "youtube-queues"
+    queue_excluded = {
+        path for path in queue_root.rglob("*") if path.is_file() and path.name.endswith(".lock")
+    } if queue_root.is_dir() and not queue_root.is_symlink() else set()
+    queue_files = files_older_than(queue_root, queue_days, queue_excluded)
+    state_files = [
+        path for path in files_older_than(wiki / ".sessions", state_days, excluded)
+        if not path.is_relative_to(queue_root)
+    ]
     return {
         "autosave": files_older_than(wiki / "inbox" / "autosave", autosave_days, excluded),
-        "state": files_older_than(wiki / ".sessions", state_days, excluded),
+        "state": state_files + queue_files,
     }
 
 
@@ -256,7 +265,7 @@ def purge_quarantine(wiki: Path, days: int, protected: set[Path]):
     return summary
 
 
-def apply_retention(wiki: Path, autosave_days: int, state_days: int, trash_days: int, scheduled: bool):
+def apply_retention(wiki: Path, autosave_days: int, queue_days: int, state_days: int, trash_days: int, scheduled: bool):
     state_path = wiki / ".sessions" / STATE_FILENAME
     lock_path = wiki / ".sessions" / LOCK_FILENAME
     if scheduled:
@@ -276,7 +285,7 @@ def apply_retention(wiki: Path, autosave_days: int, state_days: int, trash_days:
                 return {}, [], empty_purge_summary(), "skipped", "invalid-state"
             if state_status == "valid" and time.time() - last_run < MAINTENANCE_INTERVAL_SECONDS:
                 return {}, [], empty_purge_summary(), "skipped", "not-due"
-        expired = operational_files(wiki, autosave_days, state_days, state_path, lock_path)
+        expired = operational_files(wiki, autosave_days, queue_days, state_days, state_path, lock_path)
         quarantined = quarantine(wiki, expired)
         purged = purge_quarantine(wiki, trash_days, set(map(Path, quarantined))) if scheduled else empty_purge_summary()
         if scheduled:
@@ -292,12 +301,13 @@ def main():
     parser.add_argument("--apply", action="store_true", help="quarantine expired operational files")
     parser.add_argument("--scheduled", action="store_true", help="apply the SessionStart cadence")
     parser.add_argument("--autosave-days", type=int, default=defaults["autosave_days"])
+    parser.add_argument("--queue-days", type=int, default=defaults["queue_days"])
     parser.add_argument("--state-days", type=int, default=defaults["state_days"])
     parser.add_argument("--trash-days", type=int, default=defaults["trash_days"])
     parser.add_argument("--max-bytes", type=int, default=defaults["max_bytes"])
     args = parser.parse_args()
 
-    if min(args.autosave_days, args.state_days, args.trash_days, args.max_bytes) <= 0:
+    if min(args.autosave_days, args.queue_days, args.state_days, args.trash_days, args.max_bytes) <= 0:
         raise SystemExit("retention days and max bytes must be positive")
 
     workspace = Path(args.workspace).resolve()
@@ -309,10 +319,10 @@ def main():
     lock_path = wiki / ".sessions" / LOCK_FILENAME
     if args.apply:
         expired, quarantined, purged, action, skip_reason = apply_retention(
-            wiki, args.autosave_days, args.state_days, args.trash_days, args.scheduled
+            wiki, args.autosave_days, args.queue_days, args.state_days, args.trash_days, args.scheduled
         )
     else:
-        expired = operational_files(wiki, args.autosave_days, args.state_days, state_path, lock_path)
+        expired = operational_files(wiki, args.autosave_days, args.queue_days, args.state_days, state_path, lock_path)
         quarantined = []
         purged = empty_purge_summary()
         action = "dry-run"

@@ -8,6 +8,15 @@ grep -q 'projectless work' "$root/plugin/skills/wiki-ambient/SKILL.md"
 test -x "$root/plugin/scripts/youtube_fallback.py"
 "$root/plugin/hooks/launcher.sh" "$root/plugin/scripts/youtube_fallback.py" self-test >/dev/null
 grep -q 'install-approval-required' "$root/plugin/defaults/policy.md"
+grep -Fq '`UserPromptSubmit` owns ordinary YouTube ingestion' "$root/plugin/defaults/policy.md"
+grep -Fq 'automatic queue drain' "$root/plugin/defaults/policy.md"
+for document in \
+  "$root/plugin/defaults/policy.md" \
+  "$root/plugin/skills/wiki-ambient/SKILL.md" \
+  "$root/plugin/skills/wiki-workspace/SKILL.md"; do
+  ! grep -Fq '$PLUGIN_ROOT' "$document"
+  ! grep -Fq '$PLUGIN_DATA' "$document"
+done
 grep -q '"timeout": 45' "$root/plugin/hooks/hooks.json"
 mkdir "$root/workspace"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"SessionStart\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null

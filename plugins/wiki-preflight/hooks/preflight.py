@@ -7,7 +7,15 @@ sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from wiki_ambient import CAPTURE_SCHEMA_VERSION, canonical_capture_uri, retrieve_memory
-from youtube_fallback import canonical_video, safe_text
+from youtube_fallback import (
+    QueueError,
+    canonical_video,
+    drain_queue,
+    ensure_queue,
+    queue_id_for,
+    queue_snapshot,
+    safe_text,
+)
 
 SENSITIVE = re.compile(r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*", re.I)
 IGNORED_WORKSPACE_DIRS = {".git", ".wiki", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", ".next", ".cache"}
@@ -18,7 +26,10 @@ YOUTUBE_ACTION_PATTERN = re.compile(
     re.I,
 )
 YOUTUBE_PREFLIGHT_MAX_URLS = 2
-YOUTUBE_PREFLIGHT_TIMEOUT = 16
+YOUTUBE_PREFLIGHT_DEADLINE = 16
+YOUTUBE_DRAIN_DEADLINE = 20
+YOUTUBE_DRAIN_MAX_URLS = 2
+YOUTUBE_HOOK_BUDGET = 40
 
 def atomic_json_write(path, data):
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -144,70 +155,61 @@ def youtube_prompt_urls(prompt):
     return urls
 
 
-def youtube_preflight_context(root, cwd, prompt):
+def bounded_youtube_drain(cwd, queue_id, max_seconds, hook_deadline, limit):
+    remaining = hook_deadline - time.monotonic()
+    if remaining < 1:
+        return {"status": "deadline", "queue_id": queue_id, "processed": 0}
+    return drain_queue(
+        cwd,
+        queue_id,
+        min(max_seconds, remaining),
+        concurrency=2,
+        limit=limit,
+    )
+
+
+def youtube_preflight_context(root, cwd, prompt, payload):
     urls = youtube_prompt_urls(prompt)
     if not urls:
         return ""
 
-    helper = Path(__file__).resolve().parents[1] / "scripts" / "youtube_fallback.py"
-    output_dir = root / "inbox" / "youtube" if root else None
     lines = ["YouTube automatic fallback preflight (bounded; no installer approval supplied):"]
-    for url in urls[:YOUTUBE_PREFLIGHT_MAX_URLS]:
-        command = [
-            sys.executable,
-            str(helper),
-            "captions",
-            url,
-            "--attempts",
-            "1",
-            "--backoff",
-            "0",
-            "--timeout",
-            "12",
-        ]
-        if output_dir:
-            command.extend(("--output-dir", str(output_dir)))
-        try:
-            result = subprocess.run(
-                command,
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                timeout=YOUTUBE_PREFLIGHT_TIMEOUT,
-                check=False,
-                cwd=str(cwd),
+    try:
+        queue_id = queue_id_for(payload.get("session_id"), payload.get("turn_id"))
+        ensure_queue(root, urls, queue_id)
+        hook_deadline = time.monotonic() + YOUTUBE_HOOK_BUDGET
+        initial = bounded_youtube_drain(cwd, queue_id, YOUTUBE_PREFLIGHT_DEADLINE, hook_deadline, YOUTUBE_PREFLIGHT_MAX_URLS)
+        automatic = bounded_youtube_drain(cwd, queue_id, YOUTUBE_DRAIN_DEADLINE, hook_deadline, YOUTUBE_DRAIN_MAX_URLS) if initial.get("status") == "ok" else initial
+        snapshot = queue_snapshot(root, queue_id)
+    except (OSError, QueueError) as error:
+        lines.append(f"- queue: status=unavailable; reason={safe_text(str(error), 160)}")
+        lines.append("Only listed new caption files are evidence; no-captions and stale-captions-ignored are not fresh transcripts.")
+        return "\n".join(lines)
+
+    if snapshot.get("status") != "ok":
+        lines.append(f"- queue: status={safe_text(str(snapshot.get('status') or 'unavailable'), 80)}; no mutation")
+    else:
+        for item in snapshot["records"]:
+            files = item.get("files") if isinstance(item.get("files"), list) else []
+            provenance = safe_text(str(item.get("provenance_class") or "none"), 40)
+            evidence = "eligible" if item.get("evidence_eligible") is True else "ineligible"
+            transcript = "eligible" if item.get("transcript_eligible") is True else "not-available"
+            lines.append(
+                f"- {item['url']}: status={item['status']}; provenance={provenance}; "
+                f"evidence={evidence}; transcript={transcript}; files={len(files)}"
             )
-        except subprocess.TimeoutExpired:
-            lines.append(f"- {url}: status=hook-timeout; files=0")
-            continue
-        except OSError:
-            lines.append(f"- {url}: status=hook-unavailable; files=0")
-            continue
-
-        data = None
-        for line in reversed((result.stdout or "").splitlines()):
-            try:
-                candidate = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(candidate, dict):
-                data = candidate
-                break
-        if data is None:
-            lines.append(f"- {url}: status=hook-error; files=0; exit={result.returncode}")
-            continue
-
-        status = safe_text(str(data.get("status") or "unknown"), 80)
-        files = data.get("files") if isinstance(data.get("files"), list) else []
-        lines.append(f"- {url}: status={status}; files={len(files)}")
-        if files:
-            rendered = "; ".join(safe_text(str(path), 500) for path in files[:8])
-            lines.append(f"  caption_files={rendered}")
-        if status == "install-approval-required":
-            lines.append("  installation=blocked; request explicit approval before using --approve-install")
-
-    if len(urls) > YOUTUBE_PREFLIGHT_MAX_URLS:
-        lines.append(f"- skipped={len(urls) - YOUTUBE_PREFLIGHT_MAX_URLS} additional YouTube URL(s); process them on demand.")
+            if files:
+                lines.append(f"  caption_files={'; '.join(files[:8])}")
+            if item["status"] == "blocked-install":
+                lines.append("  installation=blocked; explicit approval is required before a new retry attempt")
+            if transcript == "not-available":
+                lines.append("  transcript=not-available; metadata-only and missing captions cannot support transcript claims")
+        if len(urls) > YOUTUBE_PREFLIGHT_MAX_URLS:
+            lines.append(
+                f"- queued={len(urls) - YOUTUBE_PREFLIGHT_MAX_URLS} additional YouTube URL(s); "
+                f"automatic drain processed={automatic.get('processed', 0)}; "
+                f"terminal={snapshot['terminal']}; pending={snapshot['pending']}."
+            )
     lines.append("Only listed new caption files are evidence; no-captions and stale-captions-ignored are not fresh transcripts.")
     return "\n".join(lines)
 
@@ -305,7 +307,7 @@ if root:
             os.replace(temporary, output)
         state.unlink(missing_ok=True)
     retrieval = safe_retrieve(cwd, prompt) if event == "UserPromptSubmit" else None
-    youtube_context = youtube_preflight_context(root, cwd, prompt) if event == "UserPromptSubmit" else ""
+    youtube_context = youtube_preflight_context(root, cwd, prompt, payload) if event == "UserPromptSubmit" else ""
     policy = (Path(__file__).resolve().parents[1] / "defaults" / "policy.md").read_text().strip()
     index = (root / "_index.md").read_text()[:4000]
     captures = sorted((root / "inbox" / "autosave").glob("*.md"))[-3:]

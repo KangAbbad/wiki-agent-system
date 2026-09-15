@@ -43,12 +43,17 @@ state. The adapter has no automatic team sync or shared-memory behavior.
 If private environment roots resolve inside a Git repository, capture fails
 closed before writing them.
 
-Intent-gated retrieval is available through `"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" retrieve`: a
-self-contained prompt abstains, while continuation, prior-decision, research,
-architecture, or repeated-investigation signals enable bounded retrieval of
-canonical records with `status: canonical` and a valid `canonical_uri` in
-Workspace Wiki, then User Wiki, then Mnemosyne hints. Mnemosyne hints are
-non-authoritative.
+Intent-gated retrieval is available through the installed bundle's stable
+launcher contract: a self-contained prompt abstains, while continuation,
+prior-decision, research, architecture, or repeated-investigation signals
+enable bounded retrieval of canonical records with `status: canonical` and a
+valid `canonical_uri` in Workspace Wiki, then User Wiki, then Mnemosyne hints.
+Mnemosyne hints are non-authoritative. The plugin runtime owns its paths; do
+not construct or paste a runtime shell command from this policy.
+
+For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
+ingestion and the agent automatically drains any remaining queue entries during
+the same task. No user-side command or repeated prompt is required.
 
 ## Invariants
 

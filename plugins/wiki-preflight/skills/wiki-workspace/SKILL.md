@@ -26,7 +26,17 @@ Before any workspace task, read `.wiki/_index.md`, then indexes for recent captu
 
 If `.wiki/` exists, validate ownership before writing. A valid LLM Wiki has `config.md`, `_index.md`, `raw/`, and `wiki/`. A foreign/incomplete `.wiki/` is read-only to this system: do not initialize, lint-fix, or write into it; route capture to hub pending storage instead.
 
-Run `"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" resolve --cwd "$PWD"` before a wiki operation. Prefer a local `.wiki/`, then a workspace mapping, then a unique topic alias. For reads without a route, inspect relevant hub indexes. For explicit writes, create the topic from the workspace identity and register the mapping as part of the write. Ask only when multiple candidate topics remain.
+Before a wiki operation, use the installed bundle's stable launcher contract
+for `resolve`. Prefer a local `.wiki/`, then a workspace mapping, then a unique
+topic alias. For reads without a route, inspect relevant hub indexes. For
+explicit writes, create the topic from the workspace identity and register the
+mapping as part of the write. Ask only when multiple candidate topics remain.
+The plugin runtime owns its paths; do not construct or paste a runtime shell
+command from this policy.
+
+For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
+ingestion and the agent automatically drains any remaining queue entries during
+the same task. No user-side command or repeated prompt is required.
 
 ## Invariants
 
@@ -45,14 +55,9 @@ After a meaningful completed task, classify scope from the outcome; never requir
 ### Required semantic finalizer
 
 Before sending the final response for meaningful workspace work, execute the
-bundled `capture` command. Meaningful work means an implementation,
+the bundled semantic finalizer through its stable launcher contract. Meaningful
+work means an implementation,
 investigation, research, plan, decision, verification, or changed artifact:
-
-```sh
-"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" capture --cwd "$PWD" \
-  --scope auto --outcome "<what was completed>" \
-  --kind result --confidence unverified
-```
 
 Use `--scope workspace` for repository truth, `--scope user` for reusable
 cross-repository knowledge, and `--scope uncertain` for mixed or unresolved
@@ -71,9 +76,9 @@ later calls add missing fields and replace the outcome with the final result.
 Captures route to the resolved topic's `inbox/autosave/`; unresolved work routes to the hub's operational `.sessions/autosave/` until a topic exists. Capture is preservation, not evidence. Auto-canonicalize only a supplied, attributable source; otherwise leave the capture pending curation.
 
 Canonical evidence requires source content, an absolute HTTP(S) provenance URL,
-a title, and a content hash. Use `"$PLUGIN_ROOT/hooks/launcher.sh" "$PLUGIN_ROOT/scripts/wiki_ambient.py" canonicalize` only after those
-fields are available; it writes the evidence to `raw/`. Never promote an
-autosave, unsourced claim, secret, or `.env` file.
+a title, and a content hash. Use the stable launcher contract for
+`canonicalize` only after those fields are available; it writes the evidence to
+`raw/`. Never promote an autosave, unsourced claim, secret, or `.env` file.
 
 For mixed or low-confidence scope, preserve a pending capture automatically and state the selected tentative scope. Accept ordinary-language correction and move future routing accordingly; do not require a command or topic name.
 
