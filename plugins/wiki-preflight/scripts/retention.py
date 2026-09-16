@@ -216,7 +216,7 @@ def destination_for(trash: Path, category: str, relative: Path) -> Path:
 
 
 def operational_files(wiki: Path, autosave_days: int, queue_days: int, state_days: int, state_path: Path, lock_path: Path):
-    excluded = {state_path, lock_path}
+    excluded = {state_path, lock_path, wiki / ".sessions" / "wiki-agent-system" / "capture.lock"}
     queue_root = wiki / ".sessions" / "wiki-agent-system" / "youtube-queues"
     receipt_root = wiki / ".sessions" / "wiki-agent-system" / RECEIPT_DIRNAME
     queue_excluded = {

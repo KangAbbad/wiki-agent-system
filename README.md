@@ -30,35 +30,35 @@ authorized, include the relevant durable `.wiki/` knowledge; never stage the
 runtime session directory. User Wiki/configuration and Mnemosyne remain outside
 the repository boundary. Mnemosyne has no automatic team sync or shared-memory
 path. If `HOME`, `XDG_CONFIG_HOME`, or their resolved private targets point
-inside a Git repository, the capture command fails closed before creating
-private files there. Lifecycle hooks invoke a launcher that disables Python
-bytecode writes and redirects any interpreter cache outside the worktree before
-Python starts.
+inside a Git repository, private-scope writes fail closed before creating
+files there. Lifecycle hooks invoke a launcher that disables Python bytecode
+writes and redirects any interpreter cache outside the worktree before Python
+starts.
 
 ## Structured capture
 
-Use the bundled finalizer after meaningful work through the installed plugin's
-stable launcher contract. It writes an atomic, redacted, pending-curation
-record; it does not make unsupported claims canonical. The runtime owns the
-launcher path, so agents and users should not paste a runtime shell command
-into a normal terminal. Supply the outcome plus applicable kind, artifacts,
-decisions, verifications, sources, confidence, and open questions through the
-plugin's capture interface.
+The Stop hook owns the default semantic capture after meaningful work. It
+records bounded intent, then writes one atomic, redacted, pending-curation
+record from the final assistant message; it does not make unsupported claims
+canonical. Optional structured enrichment preserves applicable outcome,
+decisions, artifacts, verifications, sources, confidence, and open questions in
+the same task record. Bounded Markdown sections named Outcome, Decisions,
+Artifacts, Verification, Sources, Confidence, and Open questions are extracted
+when present; unstructured replies remain bounded outcome captures. No terminal
+invocation is required for preservation.
 
-Outcome is required. Optional fields: decisions, workspace-relative artifacts,
-verification, attributable sources, confidence, and open questions.
 Credential-like values are replaced with `[REDACTED]`.
 
 ## Optional personal memory
 
-`capture --scope personal` uses the optional `mnemosyne` CLI when available.
-The adapter stores only one bounded, redacted preference/fact supplied through
-an explicit `--decision` field and a Wiki pointer; it abstains on outcome-only
-or transcript-shaped prose and never writes personal data to the repository
-Wiki. Session scope is the default. Set `MNEMOSYNE_DEFAULT_SCOPE=global` only
-when global storage is explicitly intended. Set `MNEMOSYNE_CLI` to a fixture
-or alternate CLI path for tests. Missing, invalid, or timed-out adapters
-return diagnostics and leave the capture flow successful.
+Personal-scope handoff uses the optional `mnemosyne` CLI when available. The
+adapter stores only one bounded, redacted preference/fact and a Wiki pointer;
+it abstains on outcome-only or transcript-shaped prose and never writes
+personal data to the repository Wiki. Session scope is the default. Set
+`MNEMOSYNE_DEFAULT_SCOPE=global` only when global storage is explicitly
+intended. Set `MNEMOSYNE_CLI` to a fixture or alternate CLI path for tests.
+Missing, invalid, or timed-out adapters return diagnostics and leave the
+capture flow successful.
 
 `retrieve --prompt ...` is intent-gated and bounded. It checks records with
 `status: canonical` and a valid `canonical_uri` in the Workspace Wiki first,

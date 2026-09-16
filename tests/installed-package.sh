@@ -16,6 +16,7 @@ for document in \
   "$root/plugin/skills/wiki-workspace/SKILL.md"; do
   ! grep -Fq '$PLUGIN_ROOT' "$document"
   ! grep -Fq '$PLUGIN_DATA' "$document"
+  ! grep -Eq 'run.*semantic finalizer|execute.*semantic finalizer|stable launcher contract|capture --scope|python3.*wiki_ambient.py' "$document"
 done
 grep -q '"timeout": 45' "$root/plugin/hooks/hooks.json"
 test "$(grep -c 'provision.py' "$root/plugin/hooks/hooks.json")" -eq 3
@@ -28,3 +29,7 @@ printf 'changed\n' >"$root/workspace/changed.txt"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"installed\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed installed verification\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >"$root/stop.json"
 ! grep -q '"decision": "block"' "$root/stop.json"
 test -n "$(find "$root/workspace/.wiki/inbox/autosave" -type f)"
+
+printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize the installed runtime result\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
+printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed durable installed verification\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
+grep -R -q 'Completed durable installed verification' "$root/workspace/.wiki/inbox/autosave"

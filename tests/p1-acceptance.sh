@@ -683,7 +683,7 @@ scope_routing() (
   stop_result=$(printf '%s' "{\"cwd\":\"$fallback_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"fallback\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed fallback\"}" | \
     "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
   printf '%s' "$stop_result" | grep -q '"hookEventName": "Stop"'
-  fallback_capture=$(find "$fallback_workspace/.wiki/inbox/autosave" -name '*-semantic-fallback.md')
+  fallback_capture=$(find "$fallback_workspace/.wiki/inbox/autosave" -name 'session-*.md')
   test -n "$fallback_capture"
   grep -q '^scope: workspace$' "$fallback_capture"
 
@@ -862,7 +862,7 @@ check 'source clean-device smoke test' from_root sh tests/clean-device.sh
 check 'installed-package smoke test' from_root sh tests/installed-package.sh
 check 'YouTube caption fallback' from_root sh tests/youtube-fallback.sh
 check 'live coexistence test' from_root sh tests/live-coexistence.sh
-check 'Git marketplace clean-device test' from_root sh tests/git-marketplace-clean-device.sh
+check 'Git marketplace clean-device test' env WIKI_MARKETPLACE_SOURCE="$root" WIKI_MARKETPLACE_REF= sh "$root/tests/git-marketplace-clean-device.sh"
 check 'launcher-only plugin runtime' launcher_only_runtime
 
 if [ "$failed" -eq 0 ]; then

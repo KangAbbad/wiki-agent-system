@@ -11,22 +11,27 @@ with a newer schema is read-only until a compatible plugin version is installed.
 Plugin hooks execute from stable `PLUGIN_DATA` after provisioning; an active
 task survives removal of the versioned plugin cache during a later upgrade.
 
-## Semantic finalizer
+## Stop-owned capture
 
-Before sending the final response for meaningful workspace work, run
-the bundled semantic finalizer through the installed plugin's stable launcher
-contract. Meaningful work includes an implementation, investigation, research,
-plan, decision, verification, or changed artifact. Supply every applicable
-`--decision`, `--artifact`, `--verification`, `--source`, `--confidence`, and
-`--open-question`; use `--kind` to classify the capture. Do not ask the user to save it.
-Do not capture trivial replies, raw transcripts, tool output, or secrets.
-Repeated semantic captures in one Codex task merge into one pending record;
-preserve decisions, artifacts, verification, sources, and open questions.
+The Stop hook owns the default semantic capture for meaningful workspace work.
+At `UserPromptSubmit`, it stores only bounded intent signals and task state.
+At `Stop`, a durable prompt or a workspace change causes one atomic,
+redacted, pending-curation record from the final assistant message. Missing
+final messages, casual prompts without workspace changes, repeated Stop events,
+and capture failures abstain without interrupting the user-facing response.
 
-The Stop hook never interrupts the user-facing response. When a workspace file
-changed during the turn and the agent omitted capture, it persists a redacted
-structured fallback from the final message. A direct agent capture remains the
-richer record. Ordinary replies without workspace changes are not captured.
+Meaningful work includes an implementation, investigation, research, synthesis,
+plan, decision, verification, or changed artifact. A final response should
+summarize the outcome and include applicable decisions, artifacts,
+verification, sources, confidence, and open questions so optional structured
+enrichment can preserve them in the same task record. The hook extracts only
+bounded Markdown sections with those names; an unstructured final remains a
+bounded outcome capture. No command is required for preservation. Do not
+capture trivial replies, raw transcripts, tool output, or secrets.
+
+Hook-owned and optional structured captures share the task identity and merge
+into one record without canonicalizing final text. The Stop hook never
+interrupts the user-facing response.
 
 Captures remain `pending-curation`. Promote material to `.wiki/raw/` only with
 supplied source content, an absolute HTTP(S) provenance URL, a title, and a
@@ -67,9 +72,9 @@ both eligibility flags false.
 
 When more valid URLs are present than the bounded immediate batch, the
 remaining URLs enter the agent-owned automatic queue drain during the same
-task. No user-side shell action or repeated prompt is required. Any internal
-invocation uses only the bundled stable launcher contract; do not construct a
-separate runtime command in a normal terminal.
+task. No user-side shell action or repeated prompt is required. Hook-owned
+processing uses the provisioned stable runtime internally; no terminal command
+is part of this workflow.
 
 The hook gives both drain passes one shared 40-second YouTube budget, below the
 45-second UserPromptSubmit limit. Each URL has one total helper deadline;

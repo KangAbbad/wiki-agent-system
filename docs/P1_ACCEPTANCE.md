@@ -5,9 +5,11 @@ per control and ends with exactly `P1 ACCEPTANCE: PASS` or `P1 ACCEPTANCE: FAIL`
 
 The gate requires all controls below:
 
-- Stop never interrupts the user-facing response; after a workspace change, a
-  missed agent capture falls back quietly to a redacted structured capture of
-  the real final message;
+- Stop never interrupts the user-facing response; a durable prompt or workspace
+  change creates a redacted pending capture of the real final message without
+  requiring an agent capture command;
+- structured final-response sections are bounded and preserve decisions,
+  artifacts, verification, sources, confidence, and open questions when present;
 - semantic capture redacts credential-like values and persists required outcome;
 - canonicalization accepts attributable evidence with SHA-256 provenance and
   rejects sensitive source material;

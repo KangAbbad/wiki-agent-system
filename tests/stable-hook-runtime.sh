@@ -42,11 +42,18 @@ resolve=$(HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root
 printf '%s' "$resolve" | grep -q '"local_wiki":'
 printf '%s' "$resolve" | grep -q '"local_wiki_status": "valid"'
 
-capture_output=$(HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/scripts/wiki_ambient.py" capture \
+durable_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable-durable","turn_id":"one","prompt":"Research and synthesize the cache-free runtime result"}' "$workspace")
+printf '%s' "$durable_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >/dev/null
+printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"stable-durable","turn_id":"one","last_assistant_message":"Cache-free durable capture"}' "$workspace" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/durable-stop.json"
+grep -q '"hookEventName": "Stop"' "$test_root/durable-stop.json"
+grep -R -q 'Cache-free durable capture' "$workspace/.wiki/inbox/autosave"
+
+capture_output=$(HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_SESSION_ID=cache-removed "$data_root/current/hooks/launcher.sh" "$data_root/current/scripts/wiki_ambient.py" capture \
   --cwd "$workspace" --scope workspace --outcome 'Cache-removed stable capture' --kind result)
 printf '%s' "$capture_output" | grep -q '"status": "pending-curation"'
-capture=$(find "$workspace/.wiki/inbox/autosave" -type f -name 'session-*.md')
-test -n "$capture"
+cache_key=$(python3 -c 'import hashlib; print(hashlib.sha256(b"cache-removed").hexdigest()[:16])')
+capture="$workspace/.wiki/inbox/autosave/session-$cache_key.md"
+test -f "$capture"
 
 caption_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable","turn_id":"caption","prompt":"Riset video https://youtu.be/dQw4w9WgXcQ"}' "$workspace")
 printf '%s' "$caption_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/caption-context.json"
@@ -80,10 +87,11 @@ set_version "$new_root" 0.3.3
 provision "$old_root"
 old_payload=$(printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$workspace")
 printf '%s' "$old_payload" | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >/dev/null
-HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/scripts/wiki_ambient.py" capture \
+HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_SESSION_ID=rollback "$data_root/current/hooks/launcher.sh" "$data_root/current/scripts/wiki_ambient.py" capture \
   --cwd "$workspace" --outcome 'Rollback-readable capture' --kind result >/dev/null
-capture=$(find "$workspace/.wiki/inbox/autosave" -type f -name 'session-*.md')
-test -n "$capture"
+rollback_key=$(python3 -c 'import hashlib; print(hashlib.sha256(b"rollback").hexdigest()[:16])')
+capture="$workspace/.wiki/inbox/autosave/session-$rollback_key.md"
+test -f "$capture"
 
 provision "$new_root"
 test -f "$data_root/current/hooks/preflight.py"

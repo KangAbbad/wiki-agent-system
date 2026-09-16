@@ -29,20 +29,30 @@ printf '%s\n' '# Research result' 'Use bounded retries for remote calls.' >"$wor
 run_hook UserPromptSubmit >"$test_root/research.json"
 grep -q 'bounded retries' "$test_root/research.json"
 
-# Stop fallback is quiet, only follows a workspace change, and stays unique.
-printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"one"}' | "$launcher" "$hook" >/dev/null
-printf 'one\n' >"$workspace/one.txt"
+# Stop owns durable prompt capture even without workspace mutation and stays unique.
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"one","prompt":"Research and synthesize the migration decision"}' | "$launcher" "$hook" >/dev/null
 printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"one","last_assistant_message":"Completed one"}' | "$launcher" "$hook" >"$test_root/stop-one.json"
 ! grep -q '"decision": "block"' "$test_root/stop-one.json"
-printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix","turn_id":"two"}' | "$launcher" "$hook" >/dev/null
+test "$(find "$workspace/.wiki/inbox/autosave" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 1
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"one","last_assistant_message":"Repeated stop"}' | "$launcher" "$hook" >/dev/null
+test "$(find "$workspace/.wiki/inbox/autosave" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 1
+
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"matrix-two","turn_id":"one"}' | "$launcher" "$hook" >/dev/null
 printf 'two\n' >"$workspace/two.txt"
-printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix","turn_id":"two","last_assistant_message":"Completed two"}' | "$launcher" "$hook" >/dev/null
-test "$(find "$workspace/.wiki/inbox/autosave" -name '*-semantic-fallback.md' | wc -l | tr -d ' ')" -eq 2
+printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"Stop","session_id":"matrix-two","turn_id":"one","last_assistant_message":"Completed two"}' | "$launcher" "$hook" >/dev/null
+test "$(find "$workspace/.wiki/inbox/autosave" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 2
+
+casual="$test_root/casual"
+mkdir "$casual"
+printf '%s' "{\"cwd\":\"$casual\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"casual\",\"turn_id\":\"one\",\"prompt\":\"What is two plus two?\"}" | "$launcher" "$hook" >/dev/null
+printf '%s' "{\"cwd\":\"$casual\",\"hook_event_name\":\"Stop\",\"session_id\":\"casual\",\"turn_id\":\"one\",\"last_assistant_message\":\"4\"}" | "$launcher" "$hook" >/dev/null
+test "$(find "$casual/.wiki/inbox" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 0
 
 # Docs routing is content policy, not a folder-name heuristic.
 policy="$test_root/plugin/defaults/policy.md"
 grep -q 'knowledge artifacts in `.wiki/`' "$policy"
 grep -q 'explicit product/developer documentation' "$policy"
+! grep -q 'run.*semantic finalizer\|python3.*wiki_ambient.py' "$policy"
 
 # The marketplace package includes the global policy required for projectless
 # user-scope work; a device-local skill is not a dependency.

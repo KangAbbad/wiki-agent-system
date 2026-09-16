@@ -26,13 +26,12 @@ Before any workspace task, read `.wiki/_index.md`, then indexes for recent captu
 
 If `.wiki/` exists, validate ownership before writing. A valid LLM Wiki has `config.md`, `_index.md`, `raw/`, and `wiki/`. A foreign/incomplete `.wiki/` is read-only to this system: do not initialize, lint-fix, or write into it; route capture to hub pending storage instead.
 
-Before a wiki operation, use the installed bundle's stable launcher contract
-for `resolve`. Prefer a local `.wiki/`, then a workspace mapping, then a unique
+Wiki hooks resolve a local Wiki first, then a workspace mapping, then a unique
 topic alias. For reads without a route, inspect relevant hub indexes. For
 explicit writes, create the topic from the workspace identity and register the
 mapping as part of the write. Ask only when multiple candidate topics remain.
-The plugin runtime owns its paths; do not construct or paste a runtime shell
-command from this policy.
+Runtime paths are internal; no terminal invocation is part of the normal
+agent workflow.
 
 For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
 ingestion and the agent automatically drains any remaining queue entries during
@@ -66,33 +65,28 @@ missing, request ordinary-language approval for the one-time local setup.
 
 After a meaningful completed task, classify scope from the outcome; never require a save command. A workspace-backed task is workspace-scope even when empty and without Git. Preferences, cross-repo research, ideas, and projectless work are user-scope. Include outcome, durable decision, verification, and workspace-relative artifact paths. Do not capture trivial replies, raw conversation, tool output, or secrets.
 
-### Required semantic finalizer
+## Stop-owned capture
 
-Before sending the final response for meaningful workspace work, execute the
-the bundled semantic finalizer through its stable launcher contract. Meaningful
-work means an implementation,
-investigation, research, plan, decision, verification, or changed artifact:
+The Stop hook owns the default semantic capture for meaningful workspace work.
+It records bounded prompt intent at `UserPromptSubmit`, then writes one atomic,
+redacted, pending-curation record at `Stop` when the prompt is durable or the
+workspace changed. Missing final messages, casual prompts without changes,
+repeated Stop events, and capture failures abstain without interrupting the
+user-facing response.
 
-Use `--scope workspace` for repository truth, `--scope user` for reusable
-cross-repository knowledge, and `--scope uncertain` for mixed or unresolved
-ownership. `--scope personal` returns a Mnemosyne handoff; it never writes to a
-Wiki. The Stop fallback remains workspace scope only.
-
-Add each applicable `--decision`, `--artifact`, `--verification`, `--source`,
-and `--open-question`. This is mandatory agent behavior, not a suggestion to
-the user. The Stop hook never creates a user-visible continuation. If a
-workspace file changed and the agent omitted capture, it writes a redacted
-structured fallback from the final assistant message, so the result is
-preserved without a manual save command.
-Repeated semantic captures from the same Codex task merge into one record;
-later calls add missing fields and replace the outcome with the final result.
+Final responses should summarize the outcome and include applicable decisions,
+artifacts, verification, sources, confidence, and open questions. The hook
+extracts those named Markdown sections with bounded size and item counts;
+unstructured final text remains an outcome capture. Optional structured
+enrichment shares the task identity and merges into the same record. No command
+is required for preservation, and final text is never canonical evidence.
 
 Captures route to the resolved topic's `inbox/autosave/`; unresolved work routes to the hub's operational `.sessions/autosave/` until a topic exists. Capture is preservation, not evidence. Auto-canonicalize only a supplied, attributable source; otherwise leave the capture pending curation.
 
 Canonical evidence requires source content, an absolute HTTP(S) provenance URL,
-a title, and a content hash. Use the stable launcher contract for
-`canonicalize` only after those fields are available; it writes the evidence to
-`raw/`. Never promote an autosave, unsourced claim, secret, or `.env` file.
+a title, and a content hash. Evidence creation remains an explicit workflow and
+writes only to `raw/`. Never promote an autosave, unsourced claim, secret, or
+`.env` file.
 
 For mixed or low-confidence scope, preserve a pending capture automatically and state the selected tentative scope. Accept ordinary-language correction and move future routing accordingly; do not require a command or topic name.
 
@@ -100,7 +94,7 @@ For mixed or low-confidence scope, preserve a pending capture automatically and 
 
 Apply retention only to operational session data: queue/state after 30 days, pending autosaves after 10 days, and unpromoted digests after 180 days. Expired autosaves/state move to quarantine; only `.trash/autosave/` and `.trash/state/` are permanently purged after 7 days during scheduled maintenance. Canonical `raw/`, `wiki/`, and topic output are excluded from automatic deletion.
 Quota measures the local `.wiki/` against the user-scope `max_bytes` setting;
-the retention command reads the same user-scope policy.
+retention uses the same user-scope policy.
 
 ## Document placement
 

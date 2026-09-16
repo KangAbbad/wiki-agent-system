@@ -22,12 +22,12 @@ For workspace-backed work, `wiki-workspace` owns local `.wiki/` initialization a
 preflight. For projectless work, resolve the global hub before a wiki operation;
 preserve cross-repo research, ideas, and preferences as user-scope state.
 
-Direct semantic capture accepts `--scope auto|workspace|user|personal|uncertain`.
-`auto` uses a valid local Wiki for workspace scope, a resolved user topic for
-user scope, and the user pending-scope inbox otherwise. `workspace` requires a
-valid local Wiki, `user` writes only below `~/wiki`, `uncertain` writes only to
-`~/wiki/inbox/pending-scope/`, and `personal` returns a structured Mnemosyne
-handoff without writing a Wiki record.
+Stop hooks own the default semantic capture for meaningful work. Optional
+structured enrichment uses the resolved scope, preserves the evidence boundary,
+and merges into the same task record; no command is required for preservation.
+Workspace capture requires a valid local Wiki, user-scope data stays below
+`~/wiki`, uncertain scope stays in `~/wiki/inbox/pending-scope/`, and personal
+scope returns a structured Mnemosyne handoff without writing a Wiki record.
 
 When the optional `mnemosyne` CLI is available, a personal handoff stores only
 one bounded redacted preference/fact from an explicit `--decision` field plus
@@ -43,13 +43,11 @@ state. The adapter has no automatic team sync or shared-memory behavior.
 If private environment roots resolve inside a Git repository, capture fails
 closed before writing them.
 
-Intent-gated retrieval is available through the installed bundle's stable
-launcher contract: a self-contained prompt abstains, while continuation,
-prior-decision, research, architecture, or repeated-investigation signals
-enable bounded retrieval of canonical records with `status: canonical` and a
-valid `canonical_uri` in Workspace Wiki, then User Wiki, then Mnemosyne hints.
-Mnemosyne hints are non-authoritative. The plugin runtime owns its paths; do
-not construct or paste a runtime shell command from this policy.
+Intent-gated retrieval is automatic: a self-contained prompt abstains, while
+continuation, prior-decision, research, architecture, or repeated-investigation
+signals enable bounded retrieval of canonical records with `status: canonical`
+and a valid `canonical_uri` in Workspace Wiki, then User Wiki, then Mnemosyne
+hints. Mnemosyne hints are non-authoritative.
 
 For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
 ingestion and the agent automatically drains any remaining queue entries during

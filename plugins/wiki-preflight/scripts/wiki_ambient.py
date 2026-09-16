@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from youtube_fallback import YOUTUBE_HOSTS, canonical_video, read_caption_receipt
+from youtube_fallback import YOUTUBE_HOSTS, acquire_file_lock, canonical_video, read_caption_receipt, release_file_lock
 
 
 CONFIG_TEMPLATE = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
@@ -54,6 +54,22 @@ RETRIEVAL_SIGNALS = {
     "architecture": re.compile(r"\b(?:architect(?:ure)?|design|schema|migration|component|integration)\b", re.I),
     "repeated-investigation": re.compile(r"\b(?:same (?:bug|issue|problem)|regression|revisit|historical)\b", re.I),
 }
+CAPTURE_INTENT_SIGNALS = {
+    **RETRIEVAL_SIGNALS,
+    "implementation": re.compile(
+        r"\b(?:implement|build|create|modify|edit|fix|debug|refactor|write|update|remove|delete|migrat(?:e|ion)|deploy|release|patch|change|kerjakan|buat|perbaiki|ubah|hapus|migrasi|rilis)\b",
+        re.I,
+    ),
+    "synthesis": re.compile(
+        r"\b(?:analy[sz]e|synthesi[sz]e|summar(?:ize|ise|y|izing|ising)|review|rangkum|sintesis|analisis)\b",
+        re.I,
+    ),
+    "verification": re.compile(
+        r"\b(?:verify|validate|test|audit|check|acceptance|verifikasi|validasi|uji)\b",
+        re.I,
+    ),
+    "plan": re.compile(r"\b(?:plan|planning|roadmap|rencana|rencanakan)\b", re.I),
+}
 RETRIEVAL_STOPWORDS = {
     "about",
     "again",
@@ -75,6 +91,34 @@ RETRIEVAL_STOPWORDS = {
     "which",
     "will",
     "would",
+}
+CAPTURE_MESSAGE_MAX_CHARS = 12000
+CAPTURE_SECTION_MAX_CHARS = 3000
+CAPTURE_SECTION_ITEM_MAX_CHARS = 800
+CAPTURE_SECTION_ITEM_MAX_COUNT = 16
+CAPTURE_HEADING = re.compile(
+    r"^#{1,3}\s+(?P<name>outcome|decisions?|artifacts?|files?|verifications?|tests?|sources?|references?|open questions?|confidence)\s*:?[ \t]*$",
+    re.I | re.M,
+)
+CAPTURE_SECTION_NAMES = {
+    "outcome": "outcome",
+    "decision": "decisions",
+    "decisions": "decisions",
+    "artifact": "artifacts",
+    "artifacts": "artifacts",
+    "file": "artifacts",
+    "files": "artifacts",
+    "verification": "verifications",
+    "verifications": "verifications",
+    "test": "verifications",
+    "tests": "verifications",
+    "source": "sources",
+    "sources": "sources",
+    "reference": "sources",
+    "references": "sources",
+    "open question": "open_questions",
+    "open questions": "open_questions",
+    "confidence": "confidence",
 }
 
 
@@ -329,10 +373,71 @@ def atomic_write(path: Path, content: str):
         raise
 
 
-def capture_key() -> str:
+def capture_key(identity=None) -> str:
     """Keep one capture per Codex task without exposing its runtime identifier."""
-    session = os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or uuid.uuid4().hex
+    session = identity or os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID") or uuid.uuid4().hex
     return hashlib.sha256(session.encode()).hexdigest()[:16]
+
+
+def capture_section_items(body: str) -> list[str]:
+    items = []
+    for line in body[:CAPTURE_SECTION_MAX_CHARS].splitlines():
+        match = re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(.+?)\s*$", line)
+        if not match:
+            continue
+        value = redact(match.group(1)).strip()[:CAPTURE_SECTION_ITEM_MAX_CHARS]
+        if value:
+            items.append(value)
+        if len(items) == CAPTURE_SECTION_ITEM_MAX_COUNT:
+            break
+    return items
+
+
+def capture_artifact_items(items: list[str]) -> list[str]:
+    artifacts = []
+    for item in items:
+        candidate = item.strip()
+        if candidate.startswith("`") and candidate.endswith("`"):
+            candidate = candidate[1:-1].strip()
+        else:
+            link = re.fullmatch(r"\[[^\]]+\]\(([^)]+)\)", candidate)
+            if link:
+                candidate = link.group(1).strip()
+            elif " " in candidate or not re.search(r"[./]", candidate):
+                continue
+        try:
+            path = Path(candidate)
+        except (OSError, TypeError, ValueError):
+            continue
+        if not candidate or candidate == "." or path.is_absolute() or ".." in path.parts or any(character in candidate for character in "\x00<>[]()"):
+            continue
+        artifacts.append(path.as_posix())
+    return list(dict.fromkeys(artifacts))
+
+
+def parse_capture_message(message: str) -> dict:
+    text = redact(str(message or ""))[:CAPTURE_MESSAGE_MAX_CHARS].strip()
+    sections = {}
+    headings = list(CAPTURE_HEADING.finditer(text))[:16]
+    preamble = text[:headings[0].start()].strip() if headings else text
+    for index, heading in enumerate(headings):
+        body_end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        name = CAPTURE_SECTION_NAMES[heading.group("name").lower()]
+        sections[name] = text[heading.end():body_end].strip()[:CAPTURE_SECTION_MAX_CHARS]
+    outcome = (sections.get("outcome") or preamble or text).strip()[:CAPTURE_SECTION_MAX_CHARS]
+    confidence = sections.get("confidence", "").strip().lower()
+    if confidence not in {"low", "medium", "high", "unverified"}:
+        confidence_match = re.search(r"(?im)^\s*confidence\s*:\s*(low|medium|high|unverified)\s*$", text)
+        confidence = confidence_match.group(1).lower() if confidence_match else "unverified"
+    return {
+        "outcome": outcome,
+        "decisions": capture_section_items(sections.get("decisions", "")),
+        "artifacts": capture_artifact_items(capture_section_items(sections.get("artifacts", ""))),
+        "verifications": capture_section_items(sections.get("verifications", "")),
+        "sources": capture_section_items(sections.get("sources", "")),
+        "confidence": confidence,
+        "open_questions": capture_section_items(sections.get("open_questions", "")),
+    }
 
 
 def canonical_capture_uri(scope: str, origin_workspace: str, key: str) -> str:
@@ -564,6 +669,14 @@ def capture_destination(scope: str, route: dict) -> Path:
     raise SystemExit("capture scope has no Wiki destination")
 
 
+def capture_lock_path(scope: str, route: dict) -> Path:
+    if scope == "workspace":
+        root = Path(route["local_wiki"]).resolve()
+    else:
+        root = (Path.home() / "wiki").resolve()
+    return root / ".sessions" / "wiki-agent-system" / "capture.lock"
+
+
 def personal_handoff(
     workspace: Path,
     key: str,
@@ -579,7 +692,7 @@ def personal_handoff(
     open_questions: list[str],
 ):
     adapter = mnemosyne_remember(personal_memory_summary(decisions), canonical_uri)
-    print(json.dumps({
+    return {
         "status": "handoff-required",
         "scope": "personal",
         "provider": "mnemosyne",
@@ -604,7 +717,7 @@ def personal_handoff(
             "confidence": confidence,
             "open_questions": redact_values(open_questions),
         },
-    }))
+    }
 
 
 def prior_items(content: str, heading: str) -> list[str]:
@@ -691,6 +804,7 @@ def capture(
     confidence: str,
     open_questions: list[str],
     scope: str = "auto",
+    task_key=None,
 ):
     data = load()
     if not data.get("auto_capture"):
@@ -704,10 +818,12 @@ def capture(
     scope = resolve_capture_scope(scope, route)
     safe_artifacts = safe_artifact_paths(artifacts)
     captured = datetime.now(timezone.utc)
-    key = capture_key()
+    key = task_key or capture_key()
+    if not isinstance(key, str) or not re.fullmatch(r"[0-9a-f]{16}", key):
+        raise SystemExit("capture key is invalid")
     canonical_uri = canonical_capture_uri(scope, str(origin_workspace), key)
     if scope == "personal":
-        personal_handoff(
+        return personal_handoff(
             origin_workspace,
             key,
             canonical_uri,
@@ -721,21 +837,24 @@ def capture(
             confidence,
             open_questions,
         )
-        return
     destination = capture_destination(scope, route)
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     output = destination / f"session-{key}.md"
-    previous = output.read_text() if output.exists() else ""
-    if previous:
-        capture_schema(previous)
-    previous_confidence = re.search(r"^confidence: (.+)$", previous, re.M)
-    decisions = merge_items(prior_items(previous, "Decisions"), redact_values(decisions))
-    artifacts = merge_items(prior_items(previous, "Artifacts"), [f"`{artifact}`" for artifact in safe_artifacts])
-    verifications = merge_items(prior_items(previous, "Verification"), redact_values(verifications))
-    sources = merge_items(prior_items(previous, "Sources"), redact_values(sources))
-    open_questions = merge_items(prior_items(previous, "Open questions"), redact_values(open_questions))
-    confidence = highest_confidence(previous_confidence.group(1).strip() if previous_confidence else "unverified", confidence)
-    content = f"""---
+    lock_fd, lock_reason = acquire_file_lock(capture_lock_path(scope, route))
+    if lock_fd is None:
+        raise SystemExit(f"capture lock unavailable: {lock_reason}")
+    try:
+        previous = output.read_text() if output.exists() else ""
+        if previous:
+            capture_schema(previous)
+        previous_confidence = re.search(r"^confidence: (.+)$", previous, re.M)
+        decisions = merge_items(prior_items(previous, "Decisions"), redact_values(decisions))
+        artifacts = merge_items(prior_items(previous, "Artifacts"), [f"`{artifact}`" for artifact in safe_artifacts])
+        verifications = merge_items(prior_items(previous, "Verification"), redact_values(verifications))
+        sources = merge_items(prior_items(previous, "Sources"), redact_values(sources))
+        open_questions = merge_items(prior_items(previous, "Open questions"), redact_values(open_questions))
+        confidence = highest_confidence(previous_confidence.group(1).strip() if previous_confidence else "unverified", confidence)
+        content = f"""---
 type: autosave-capture
 schema: {CAPTURE_SCHEMA_VERSION}
 scope: {scope}
@@ -779,16 +898,18 @@ confidence: {confidence}
 
 {lines(open_questions)}
 """
-    quota = None
-    if scope == "workspace":
-        existing_bytes = output.stat().st_size if output.exists() else 0
-        storage = storage_report(Path(route["local_wiki"]))
-        projected = storage["total_bytes"] - existing_bytes + len(content.encode("utf-8"))
-        quota = quota_status(data, Path(route["local_wiki"]), projected, storage)
-        if quota["level"] == "block" and len(content.encode("utf-8")) > 256 * 1024:
-            raise SystemExit("workspace wiki quota blocks this large capture; run retention report and quarantine expired operational data")
-    atomic_write(output, content)
-    print(json.dumps({"path": str(output), "topic": route["topic"], "scope": scope, "canonical_uri": canonical_uri, "status": "updated" if previous else "pending-curation", "quota": quota}))
+        quota = None
+        if scope == "workspace":
+            existing_bytes = output.stat().st_size if output.exists() else 0
+            storage = storage_report(Path(route["local_wiki"]))
+            projected = storage["total_bytes"] - existing_bytes + len(content.encode("utf-8"))
+            quota = quota_status(data, Path(route["local_wiki"]), projected, storage)
+            if quota["level"] == "block" and len(content.encode("utf-8")) > 256 * 1024:
+                raise SystemExit("workspace wiki quota blocks this large capture; run retention report and quarantine expired operational data")
+        atomic_write(output, content)
+        return {"path": str(output), "topic": route["topic"], "scope": scope, "canonical_uri": canonical_uri, "status": "updated" if previous else "pending-curation", "quota": quota}
+    finally:
+        release_file_lock(lock_fd)
 
 
 def source_slug(value: str) -> str:
@@ -917,6 +1038,12 @@ def intent_gate(prompt: str) -> dict:
         if token not in RETRIEVAL_STOPWORDS and token not in tokens:
             tokens.append(token)
     return {"matched": bool(signals), "signals": signals, "query": " ".join(tokens[:24])}
+
+
+def capture_intent(prompt: str) -> dict:
+    text = redact(str(prompt or ""))[:4000].strip()
+    signals = [name for name, pattern in CAPTURE_INTENT_SIGNALS.items() if pattern.search(text)]
+    return {"matched": bool(signals), "signals": signals[:8]}
 
 
 def retrieval_roots(root: Path, user: bool) -> list[Path]:
@@ -1133,7 +1260,7 @@ def main():
     elif args.command == "unmap":
         unmap_workspace(args.cwd, args.confirm)
     elif args.command == "capture":
-        capture(
+        print(json.dumps(capture(
             args.cwd,
             args.outcome,
             args.kind,
@@ -1144,7 +1271,7 @@ def main():
             args.confidence,
             args.open_question,
             args.scope,
-        )
+        )))
     elif args.command == "canonicalize":
         canonicalize(args.cwd, args.source, args.source_url, args.title, args.receipt_id)
     elif args.command == "transition":

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-import hashlib, json, sys, os, re, subprocess, tempfile, time, uuid
-from datetime import datetime, timezone
+import hashlib, json, sys, os, re, subprocess, tempfile, time
 from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from wiki_ambient import CAPTURE_SCHEMA_VERSION, canonical_capture_uri, retrieve_memory
+from wiki_ambient import capture, capture_intent, capture_key, parse_capture_message, redact, retrieve_memory
 from youtube_fallback import (
     QueueError,
     canonical_video,
@@ -18,9 +17,10 @@ from youtube_fallback import (
     validate_caption_receipt,
 )
 
-SENSITIVE = re.compile(r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*", re.I)
 IGNORED_WORKSPACE_DIRS = {".git", ".wiki", ".venv", "venv", "node_modules", "__pycache__", "build", "dist", ".next", ".cache"}
 WORKSPACE_SCHEMA_VERSION = 2
+FINALIZER_STATE_SCHEMA_VERSION = 1
+CAPTURE_KEY_PATTERN = re.compile(r"^[0-9a-f]{16}$")
 YOUTUBE_URL_PATTERN = re.compile(r"https?://[^\s<>'\"]+")
 YOUTUBE_ACTION_PATTERN = re.compile(
     r"\b(?:analy[sz]e|analisis|caption|cite|ingest|knowledge|kutip|pelajari|rangkum|research|riset|scrap(?:e|ing)?|subtitle|summar(?:ize|ise|y|izing|ising)|transcript|transkrip)\b",
@@ -58,11 +58,93 @@ def migrate_marker(marker):
         return "migrated"
     return "future" if isinstance(version, int) and version > WORKSPACE_SCHEMA_VERSION else "invalid"
 
+def task_identity(payload):
+    if not isinstance(payload, dict):
+        return None
+    for field in ("session_id", "thread_id", "conversation_id"):
+        value = payload.get(field)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def finalizer_state(root, payload):
-    session_id = str(payload.get("session_id") or "unknown")
-    turn_id = str(payload.get("turn_id") or "unknown")
-    key = hashlib.sha256(f"{session_id}:{turn_id}".encode()).hexdigest()[:16]
+    identity = task_identity(payload)
+    if identity is None:
+        return None
+    turn_id = payload.get("turn_id")
+    turn_id = turn_id.strip() if isinstance(turn_id, str) and turn_id.strip() else "unknown"
+    key = hashlib.sha256(f"{identity}:{turn_id}".encode()).hexdigest()[:16]
     return root / ".sessions" / "wiki-agent-system" / "finalizers" / f"{key}.json"
+
+
+def write_finalizer_state(root, payload, prompt):
+    state_path = finalizer_state(root, payload)
+    if state_path is None:
+        return
+    atomic_json_write(
+        state_path,
+        {
+            "schema_version": FINALIZER_STATE_SCHEMA_VERSION,
+            "started_at": time.time(),
+            "capture_key": capture_key(task_identity(payload)),
+            "prompt_intent": capture_intent(prompt),
+        },
+    )
+
+
+def stop_owned_capture(root, cwd, payload):
+    state_path = finalizer_state(root, payload)
+    if state_path is None:
+        return
+    cleanup_state = False
+    try:
+        if not state_path.exists():
+            return
+        try:
+            state = json.loads(state_path.read_text())
+        except (OSError, json.JSONDecodeError, TypeError):
+            return
+        if state.get("schema_version") != FINALIZER_STATE_SCHEMA_VERSION:
+            return
+        cleanup_state = True
+        started_at = state.get("started_at")
+        key = state.get("capture_key")
+        intent = state.get("prompt_intent")
+        if not isinstance(started_at, (int, float)) or not isinstance(key, str) or not CAPTURE_KEY_PATTERN.fullmatch(key):
+            return
+        message = payload.get("last_assistant_message")
+        if not isinstance(message, str):
+            return
+        message = redact(message).strip()
+        if not message:
+            return
+        prompt_qualifies = isinstance(intent, dict) and intent.get("matched") is True
+        if not prompt_qualifies and not workspace_changed_since(cwd, started_at):
+            return
+        parsed = parse_capture_message(message)
+        capture(
+            str(cwd),
+            parsed["outcome"],
+            "result",
+            parsed["artifacts"],
+            parsed["decisions"],
+            parsed["verifications"],
+            parsed["sources"],
+            parsed["confidence"],
+            parsed["open_questions"],
+            "workspace",
+            task_key=key,
+        )
+    except (OSError, SystemExit, TypeError, ValueError):
+        # Stop is fail-open: capture failure must not interrupt the response.
+        return
+    finally:
+        if cleanup_state:
+            try:
+                state_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 def workspace_changed_since(cwd, started_at):
     """Bounded mtime scan; semantic capture remains the primary signal."""
@@ -321,39 +403,9 @@ if root:
     if event == "SessionStart":
         run_scheduled_retention(root)
     if event == "UserPromptSubmit":
-        state = finalizer_state(root, payload)
-        state.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=state.parent, prefix=".turn-", text=True)
-        with os.fdopen(fd, "w") as file:
-            json.dump({"started_at": time.time()}, file)
-        os.chmod(temporary, 0o600)
-        os.replace(temporary, state)
+        write_finalizer_state(root, payload, prompt)
     if event == "Stop":
-        captures = root / "inbox" / "autosave"
-        captures.mkdir(parents=True, exist_ok=True)
-        session_id = str(payload.get("session_id") or "unknown")
-        turn_id = str(payload.get("turn_id") or "unknown")
-        state = finalizer_state(root, payload)
-        message = payload.get("last_assistant_message")
-        message = SENSITIVE.sub(lambda match: f"{match.group(1)} [REDACTED]", message or "").strip()
-        try:
-            started_at = json.loads(state.read_text()).get("started_at") if state.exists() else None
-        except (OSError, json.JSONDecodeError):
-            started_at = None
-        semantic = [path for path in captures.glob("*.md") if started_at and path.stat().st_mtime >= started_at]
-        if message and started_at and not semantic and workspace_changed_since(cwd, started_at):
-            captured = datetime.now(timezone.utc)
-            stamp = captured.strftime("%Y%m%dT%H%M%SZ")
-            output = captures / f"{stamp}-{uuid.uuid4().hex[:8]}-semantic-fallback.md"
-            capture_key = hashlib.sha256(f"{session_id}:{turn_id}".encode()).hexdigest()[:16]
-            origin_workspace = root.parent if root else cwd
-            canonical_uri = canonical_capture_uri("workspace", str(origin_workspace), capture_key)
-            fd, temporary = tempfile.mkstemp(dir=captures, prefix=".capture-", text=True)
-            with os.fdopen(fd, "w") as file:
-                file.write(f"---\ntype: semantic-stop-capture\nschema: {CAPTURE_SCHEMA_VERSION}\nscope: workspace\ncanonical_uri: {json.dumps(canonical_uri)}\norigin_workspace: {json.dumps(str(origin_workspace))}\nstatus: pending-curation\nsupersedes: null\nvalid_from: {captured.isoformat()}\nvalid_until: null\nworkspace: {origin_workspace}\nsession_id: {session_id}\nturn_id: {turn_id}\nfallback: true\n---\n\n# Auto-saved final result\n\n## Outcome\n\n{message}\n\n## Decisions\n\n- Not extracted; review outcome during curation.\n\n## Artifacts\n\n- Not extracted; inspect workspace changes during curation.\n\n## Verification\n\n- Not extracted; review outcome during curation.\n")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, output)
-        state.unlink(missing_ok=True)
+        stop_owned_capture(root, cwd, payload)
     retrieval = safe_retrieve(cwd, prompt) if event == "UserPromptSubmit" else None
     youtube_context = youtube_preflight_context(root, cwd, prompt, payload) if event == "UserPromptSubmit" else ""
     policy = (Path(__file__).resolve().parents[1] / "defaults" / "policy.md").read_text().strip()
