@@ -95,6 +95,18 @@ with audio-to-STT only when media extraction is separately allowed and label
 that evidence `machine-transcription`. If all routes fail, preserve `error` and
 never invent transcript content.
 
+Local STT is an agent-owned fallback after a terminal caption miss, never a
+`UserPromptSubmit` or Stop-hook action. It uses only public audio, private
+temporary media, installed `ffmpeg` and `whisper-cli`, and a user-private GGML
+model. It never installs binaries, downloads a model, sends media to a cloud
+service, supplies cookies, or bypasses access controls. Its output is a fresh
+`.wiki/inbox/youtube/**/VIDEO.machine-transcription.txt` record with
+`provenance_class=machine-transcription`, `evidence_eligible=false`, and
+`transcript_eligible=false`; it is usable only when explicitly characterized as
+machine transcription, never as an official caption or attributable source.
+If prerequisites are absent, request ordinary-language approval for one-time
+local setup; never expose a shell command to the user.
+
 When `yt-dlp` exits non-zero, any new or changed VTT from that attempt is removed
 before retry or return. Unchanged pre-existing VTT files are not evidence and are
 reported only as ignored stale files. Caption entries are inspected with lexical

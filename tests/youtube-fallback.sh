@@ -10,7 +10,7 @@ trap 'rm -rf "$test_root"' EXIT
 
 "$launcher" "$script" self-test
 help=$({ "$launcher" "$script" --help; } 2>&1)
-printf '%s' "$help" | grep -q 'Fetch YouTube captions through yt-dlp'
+printf '%s' "$help" | grep -q 'Fetch YouTube captions and explicitly agent-owned local transcriptions'
 captions_help=$({ "$launcher" "$script" captions --help; } 2>&1)
 printf '%s' "$captions_help" | grep -q -- '--approve-install'
 ! printf '%s' "$captions_help" | grep -q -- '--auto-install'
@@ -81,6 +81,13 @@ if "--dump-single-json" in sys.argv:
     }))
     raise SystemExit(0)
 
+if "--format" in sys.argv:
+    template = Path(sys.argv[sys.argv.index("--output") + 1])
+    target = Path(str(template).replace("%(ext)s", "webm"))
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target.write_text("fixture audio")
+    raise SystemExit(0)
+
 if os.environ.get("FAKE_YTDLP_NO_CAPTIONS") == "1":
     raise SystemExit(0)
 
@@ -92,6 +99,26 @@ if not target.exists():
     target.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nfixture caption\n")
 PY
 chmod 700 "$test_root/bin/yt-dlp"
+cat >"$test_root/bin/ffmpeg" <<'PY'
+#!/usr/bin/env python3
+from pathlib import Path
+import sys
+if __import__("os").environ.get("FAKE_FFMPEG_FAIL") == "1":
+    raise SystemExit(1)
+Path(sys.argv[-1]).write_bytes(b"RIFF fixture wav")
+PY
+chmod 700 "$test_root/bin/ffmpeg"
+cat >"$test_root/bin/whisper-cli" <<'PY'
+#!/usr/bin/env python3
+from pathlib import Path
+import os, sys
+target = Path(sys.argv[sys.argv.index("-of") + 1] + ".txt")
+if os.environ.get("FAKE_WHISPER_FAIL") == "1":
+    target.write_text("incomplete")
+    raise SystemExit(1)
+target.write_text("transkripsi mesin fixture\n")
+PY
+chmod 700 "$test_root/bin/whisper-cli"
 export PATH="$test_root/bin:$PATH"
 
 workspace="$test_root/workspace"
@@ -104,6 +131,58 @@ url='https://youtu.be/dQw4w9WgXcQ?si=ignored'
 first=$(cd "$workspace" && "$launcher" "$script" captions "$url" --attempts 1 --backoff 0 --timeout 5 --output-dir "$output_dir")
 printf '%s' "$first" | grep -q '"status": "ok"'
 test -f "$output_dir/dQw4w9WgXcQ.vtt"
+
+model="$test_root/ggml-base.bin"
+printf '%s\n' fixture-model >"$model"
+transcription_dir="$workspace/.wiki/inbox/youtube/transcriptions"
+stt_url='https://youtu.be/tGJTzahuapo?si=ignored'
+stt_video='tGJTzahuapo'
+stt_queue=$($launcher "$script" queue --workspace "$workspace" --session-id stt --turn-id one "$stt_url")
+stt_queue_id=$(printf '%s' "$stt_queue" | python3 -c 'import json,sys; print(json.load(sys.stdin)["queue_id"])')
+stt_drain=$(FAKE_YTDLP_METADATA=1 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$script" drain --workspace "$workspace" --queue-id "$stt_queue_id" --deadline 10 --limit 1)
+printf '%s' "$stt_drain" | grep -q '"metadata-only": 1'
+transcription=$(cd "$workspace" && "$launcher" "$script" transcribe "$stt_url" --workspace "$workspace" --queue-id "$stt_queue_id" --timeout 5 --model "$model" --output-dir "$transcription_dir")
+printf '%s' "$transcription" | grep -q '"status": "machine-transcription"'
+printf '%s' "$transcription" | grep -q '"provenance_class": "machine-transcription"'
+printf '%s' "$transcription" | grep -q '"evidence_eligible": false'
+printf '%s' "$transcription" | grep -q '"transcript_eligible": false'
+test -f "$transcription_dir/$stt_video.machine-transcription.txt"
+grep -q 'transkripsi mesin fixture' "$transcription_dir/$stt_video.machine-transcription.txt"
+transcription_provenance="$transcription_dir/$stt_video.machine-transcription.json"
+test -f "$transcription_provenance"
+python3 - "$transcription_provenance" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["schema_version"] == 1
+assert data["engine"] == "whisper-cli"
+assert data["language"] == "id"
+assert len(data["model_sha256"]) == 64
+assert len(data["transcript_sha256"]) == 64
+PY
+printf '%s' "$transcription" | grep -q '"transcription":'
+existing_transcription=$(cd "$workspace" && "$launcher" "$script" transcribe "$stt_url" --workspace "$workspace" --queue-id "$stt_queue_id" --timeout 5 --model "$model" --output-dir "$transcription_dir")
+printf '%s' "$existing_transcription" | grep -q '"status": "machine-transcription-existing"'
+printf '%s' "$existing_transcription" | grep -q '"files": \[\]'
+
+failed_transcription_dir="$workspace/.wiki/inbox/youtube/transcription-failed"
+set +e
+failed_transcription=$(cd "$workspace" && FAKE_WHISPER_FAIL=1 "$launcher" "$script" transcribe "$stt_url" --workspace "$workspace" --queue-id "$stt_queue_id" --timeout 5 --model "$model" --output-dir "$failed_transcription_dir" 2>&1)
+status=$?
+set -e
+test "$status" -eq 1
+printf '%s' "$failed_transcription" | grep -q '"status": "error"'
+test ! -e "$failed_transcription_dir/$stt_video.machine-transcription.txt"
+test ! -e "$failed_transcription_dir/$stt_video.machine-transcription.json"
+
+set +e
+pending_queue=$($launcher "$script" queue --workspace "$workspace" --session-id stt --turn-id pending "$stt_url")
+pending_queue_id=$(printf '%s' "$pending_queue" | python3 -c 'import json,sys; print(json.load(sys.stdin)["queue_id"])')
+premature_transcription=$(cd "$workspace" && "$launcher" "$script" transcribe "$stt_url" --workspace "$workspace" --queue-id "$pending_queue_id" --timeout 5 --model "$model" --output-dir "$workspace/.wiki/inbox/youtube/premature" 2>&1)
+status=$?
+set -e
+test "$status" -eq 2
+printf '%s' "$premature_transcription" | grep -q 'terminal caption miss'
+test ! -e "$workspace/.wiki/inbox/youtube/premature"
 
 second=$(cd "$workspace" && "$launcher" "$script" captions "$url" --attempts 1 --backoff 0 --timeout 5 --output-dir "$output_dir")
 printf '%s' "$second" | grep -q '"status": "stale-captions-ignored"'

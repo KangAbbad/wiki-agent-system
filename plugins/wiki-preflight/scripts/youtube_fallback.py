@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fetch YouTube captions through yt-dlp with an approval-gated installer."""
+"""Fetch YouTube captions and explicitly agent-owned local transcriptions."""
 
 import argparse
 import hashlib
@@ -50,7 +50,12 @@ DRAIN_DEFAULT_CONCURRENCY = 2
 DRAIN_DEFAULT_LIMIT = 2
 DRAIN_PER_URL_TIMEOUT = 12
 RESULT_STATUSES = frozenset({"ok", "no-captions", "stale-captions-ignored", "metadata-only", "error", "blocked-install", "install-approval-required", "installer-failed"})
-PROVENANCE_CLASSES = frozenset({"caption", "metadata", "none"})
+RESULT_STATUSES = RESULT_STATUSES | frozenset({"machine-transcription", "machine-transcription-existing"})
+PROVENANCE_CLASSES = frozenset({"caption", "metadata", "machine-transcription", "none"})
+TRANSCRIPTION_LANGUAGE = re.compile(r"^(?:auto|[A-Za-z]{2,10})$")
+MAX_TRANSCRIPTION_DURATION = 7200
+MAX_TRANSCRIPTION_AUDIO_BYTES = 1024 * 1024 * 1024
+MAX_TRANSCRIPT_BYTES = 25 * 1024 * 1024
 SENSITIVE = re.compile(
     r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*",
     re.I,
@@ -79,7 +84,7 @@ def safe_attempts(attempts):
             continue
         entry = {}
         route = item.get("route")
-        if route in {"caption", "metadata"}:
+        if route in {"caption", "metadata", "audio", "transcription"}:
             entry["route"] = route
         attempt = item.get("attempt")
         if type(attempt) is int and 1 <= attempt <= 4:
@@ -111,6 +116,26 @@ def safe_metadata(data):
     return result or None
 
 
+def safe_transcription(data):
+    if not isinstance(data, dict):
+        return None
+    allowed = {"schema_version", "engine", "language", "model", "model_sha256", "transcript_sha256", "duration_seconds", "created_at"}
+    if set(data) != allowed or data.get("schema_version") != 1:
+        return None
+    if data.get("engine") != "whisper-cli" or not TRANSCRIPTION_LANGUAGE.fullmatch(str(data.get("language") or "")):
+        return None
+    if not isinstance(data.get("model"), str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", data["model"]):
+        return None
+    for name in ("model_sha256", "transcript_sha256"):
+        if not isinstance(data.get(name), str) or not re.fullmatch(r"[0-9a-f]{64}", data[name]):
+            return None
+    if type(data.get("duration_seconds")) is not int or not 0 <= data["duration_seconds"] <= 86400:
+        return None
+    if not isinstance(data.get("created_at"), str) or len(data["created_at"]) > 40:
+        return None
+    return data
+
+
 def result_contract(
     status,
     video_id,
@@ -122,6 +147,7 @@ def result_contract(
     error_class=None,
     error=None,
     metadata=None,
+    transcription=None,
     evidence_reason=None,
 ):
     if status not in RESULT_STATUSES:
@@ -130,9 +156,14 @@ def result_contract(
         raise ValueError("ok result requires fresh caption files")
     if status == "metadata-only" and not safe_metadata(metadata):
         raise ValueError("metadata-only result requires metadata")
+    if status == "machine-transcription" and not files:
+        raise ValueError("machine-transcription result requires a fresh transcript file")
+    if status == "machine-transcription" and not safe_transcription(transcription):
+        raise ValueError("machine-transcription result requires provenance metadata")
     provenance_class = {
         "ok": "caption",
         "metadata-only": "metadata",
+        "machine-transcription": "machine-transcription",
     }.get(status, "none")
     reason = evidence_reason or {
         "ok": "fresh-regular-vtt",
@@ -143,6 +174,8 @@ def result_contract(
         "blocked-install": "installer-approval-required",
         "install-approval-required": "installer-approval-required",
         "installer-failed": "installer-failed",
+        "machine-transcription": "local-stt-not-caption-evidence",
+        "machine-transcription-existing": "existing-machine-transcription-ignored",
     }[status]
     payload = {
         "status": status,
@@ -156,6 +189,7 @@ def result_contract(
         "existing_files_ignored": [str(path) for path in (existing_files_ignored or [])],
         "attempts": safe_attempts(attempts),
         "metadata": safe_metadata(metadata) if status == "metadata-only" else None,
+        "transcription": safe_transcription(transcription) if status == "machine-transcription" else None,
         "error_class": safe_text(str(error_class), 80) if error_class else None,
         "error": safe_text(str(error), 1200) if error else None,
     }
@@ -343,7 +377,7 @@ def valid_attempts(value):
     for attempt in value:
         if not isinstance(attempt, dict) or set(attempt) - allowed:
             return False
-        if attempt.get("route") not in {"caption", "metadata"}:
+        if attempt.get("route") not in {"caption", "metadata", "audio", "transcription"}:
             return False
         if type(attempt.get("attempt")) is not int or not 1 <= attempt["attempt"] <= 4:
             return False
@@ -1260,6 +1294,231 @@ def fetch_captions(args):
     ), 1)
 
 
+def default_transcription_model():
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    return config_home / "llm-wiki" / "models" / "ggml-base.bin"
+
+
+def regular_file(path, maximum_bytes=None):
+    try:
+        metadata = Path(path).lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(metadata.st_mode) and not stat.S_ISLNK(metadata.st_mode) and (
+        maximum_bytes is None or 0 < metadata.st_size <= maximum_bytes
+    )
+
+
+def transcription_output(output_dir, video_id):
+    return output_dir / f"{video_id}.machine-transcription.txt"
+
+
+def transcription_provenance_output(transcript):
+    return transcript.with_suffix(".json")
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def atomic_json(path, payload):
+    if path.parent.is_symlink() or path.is_symlink():
+        raise OSError("provenance path is a symlink")
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".transcription-", text=True)
+    try:
+        with os.fdopen(fd, "w") as file:
+            json.dump(payload, file, ensure_ascii=False, sort_keys=True)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def cleanup_transcript(path, output_dir):
+    if path.parent != output_dir or path != output_dir / path.name:
+        return "transcript path escaped output directory"
+    try:
+        metadata = path.lstat()
+        if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
+            return "transcript path is not a regular file or symlink"
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        return safe_text(str(error), 160)
+    return None
+
+
+def cleanup_transcription_artifacts(transcript, output_dir):
+    errors = [cleanup_transcript(path, output_dir) for path in (transcript, transcription_provenance_output(transcript))]
+    return next((error for error in errors if error), None)
+
+
+def valid_existing_transcription(transcript, provenance):
+    if not regular_file(transcript, MAX_TRANSCRIPT_BYTES) or not regular_file(provenance, MAX_TRANSCRIPT_BYTES):
+        return False
+    try:
+        data = safe_transcription(json.loads(provenance.read_text(encoding="utf-8")))
+        return bool(data and data["transcript_sha256"] == sha256_file(transcript))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+
+
+def media_file(directory):
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return None
+    candidates = [path for path in entries if regular_file(path, MAX_TRANSCRIPTION_AUDIO_BYTES)]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def transcription_binaries():
+    ffmpeg = shutil.which("ffmpeg")
+    whisper = shutil.which("whisper-cli")
+    if not ffmpeg or not whisper:
+        missing = ", ".join(name for name, value in (("ffmpeg", ffmpeg), ("whisper-cli", whisper)) if not value)
+        return None, f"local STT unavailable: {missing} is not installed"
+    return (ffmpeg, whisper), None
+
+
+def validate_transcription_options(args):
+    if args.timeout < TIMEOUT_MIN or args.timeout > TIMEOUT_MAX:
+        raise ValueError(f"--timeout must be between {TIMEOUT_MIN} and {TIMEOUT_MAX} seconds")
+    if not TRANSCRIPTION_LANGUAGE.fullmatch(args.language):
+        raise ValueError("--language must be auto or a short language code")
+    if args.max_duration < 1 or args.max_duration > MAX_TRANSCRIPTION_DURATION:
+        raise ValueError(f"--max-duration must be between 1 and {MAX_TRANSCRIPTION_DURATION} seconds")
+
+
+def transcription_error(video_id, url, attempts, error_class, error=None):
+    return result_contract(
+        "error", video_id, url, attempts=attempts, error_class=error_class,
+        error=error, evidence_reason="local-stt-failed",
+    )
+
+
+def transcription_gate(workspace, queue_id, url):
+    try:
+        wiki = queue_wiki(workspace)
+        snapshot = queue_snapshot(workspace, queue_id)
+    except (OSError, QueueError) as error:
+        raise QueueError(f"local STT requires a readable caption queue: {safe_text(str(error), 120)}") from error
+    if snapshot.get("status") != "ok":
+        raise QueueError("local STT requires a readable caption queue")
+    item = next((candidate for candidate in snapshot["records"] if candidate["url"] == url), None)
+    if not item or item["status"] not in {"no-captions", "metadata-only"} or item["transcript_eligible"]:
+        raise QueueError("local STT requires a terminal caption miss for this video")
+    return wiki
+
+
+def transcribe(args):
+    """Download public audio into a private temporary directory and run local STT.
+
+    This command is intentionally not called from the prompt hook: an agent owns
+    the longer bounded workflow after a terminal caption result.
+    """
+    video_id, url = canonical_video(args.url)
+    validate_transcription_options(args)
+    wiki = transcription_gate(args.workspace, args.queue_id, url)
+    fd, reason = acquire_file_lock(url_lock_path(wiki, url))
+    if fd is None:
+        emit(transcription_error(video_id, url, [], "stt-lock-unavailable", reason), 2)
+    try:
+        transcribe_locked(args, video_id, url, wiki)
+    finally:
+        release_file_lock(fd)
+
+
+def transcribe_locked(args, video_id, url, wiki):
+    output_dir = Path(args.output_dir or default_output_dir()).expanduser().resolve()
+    validate_output_scope(output_dir)
+    if nearest_wiki(output_dir) != wiki:
+        raise QueueError("local STT output must stay in the caption queue Wiki")
+    model = Path(args.model or default_transcription_model()).expanduser()
+    if not regular_file(model, 2 * 1024 * 1024 * 1024):
+        emit(transcription_error(video_id, url, [], "stt-model-unavailable", "local Whisper model is missing or unsafe"), 2)
+    binaries, binary_error = transcription_binaries()
+    if not binaries:
+        emit(transcription_error(video_id, url, [], "stt-unavailable", binary_error), 2)
+    command, install_error = ensure_ytdlp(False)
+    if not command:
+        emit(transcription_error(video_id, url, [], "audio-downloader-unavailable", install_error), 2)
+    output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    transcript = transcription_output(output_dir, video_id)
+    provenance = transcription_provenance_output(transcript)
+    existing = [path for path in (transcript, provenance) if path.exists() or path.is_symlink()]
+    if existing:
+        if len(existing) != 2 or not valid_existing_transcription(transcript, provenance):
+            emit(transcription_error(video_id, url, [], "stt-existing-output-unsafe"), 2)
+        emit(result_contract("machine-transcription-existing", video_id, url, existing_files_ignored=existing), 0)
+
+    deadline = time.monotonic() + args.timeout
+    metadata, metadata_attempt = fetch_metadata(command, url, deadline - time.monotonic())
+    attempts = [metadata_attempt]
+    duration = (metadata or {}).get("duration")
+    if isinstance(duration, int) and duration > args.max_duration:
+        emit(transcription_error(video_id, url, attempts, "media-too-long", "video exceeds local transcription duration limit"), 2)
+    if time.monotonic() >= deadline:
+        emit(transcription_error(video_id, url, attempts, "deadline-exhausted"), 1)
+
+    ffmpeg, whisper = binaries
+    with tempfile.TemporaryDirectory(prefix="wiki-youtube-stt-") as temporary:
+        temporary_path = Path(temporary)
+        downloaded = temporary_path / "download.%(ext)s"
+        audio = temporary_path / "audio.wav"
+        remaining = deadline - time.monotonic()
+        process = run_command(command + [
+            "--ignore-config", "--no-playlist", "--no-progress", "--no-overwrites",
+            "--format", "bestaudio/best", "--output", str(downloaded), url,
+        ], remaining)
+        attempts.append({"route": "audio", "attempt": 1, "returncode": process.returncode if isinstance(process, subprocess.CompletedProcess) else None, "error_class": None if isinstance(process, subprocess.CompletedProcess) and process.returncode == 0 else "audio-download-failed"})
+        source = media_file(temporary_path)
+        if not isinstance(process, subprocess.CompletedProcess) or process.returncode or not source:
+            emit(transcription_error(video_id, url, attempts, "audio-download-failed", "public audio was unavailable"), 1)
+        remaining = deadline - time.monotonic()
+        process = run_command([ffmpeg, "-nostdin", "-y", "-i", str(source), "-vn", "-ac", "1", "-ar", "16000", str(audio)], remaining)
+        attempts.append({"route": "audio", "attempt": 2, "returncode": process.returncode if isinstance(process, subprocess.CompletedProcess) else None, "error_class": None if isinstance(process, subprocess.CompletedProcess) and process.returncode == 0 else "audio-conversion-failed"})
+        if not isinstance(process, subprocess.CompletedProcess) or process.returncode or not regular_file(audio, MAX_TRANSCRIPTION_AUDIO_BYTES):
+            emit(transcription_error(video_id, url, attempts, "audio-conversion-failed"), 1)
+        remaining = deadline - time.monotonic()
+        process = run_command([whisper, "-m", str(model), "-f", str(audio), "-l", args.language, "-otxt", "-of", str(transcript.with_suffix(""))], remaining)
+        attempts.append({"route": "transcription", "attempt": 1, "returncode": process.returncode if isinstance(process, subprocess.CompletedProcess) else None, "error_class": None if isinstance(process, subprocess.CompletedProcess) and process.returncode == 0 else "stt-failed"})
+        if not isinstance(process, subprocess.CompletedProcess) or process.returncode or not regular_file(transcript, MAX_TRANSCRIPT_BYTES):
+            cleanup_error = cleanup_transcription_artifacts(transcript, output_dir)
+            emit(transcription_error(video_id, url, attempts, "stt-cleanup" if cleanup_error else "stt-failed", cleanup_error), 1)
+        try:
+            if not transcript.read_text(encoding="utf-8").strip():
+                raise ValueError("empty transcript")
+        except (OSError, UnicodeError, ValueError) as error:
+            cleanup_error = cleanup_transcription_artifacts(transcript, output_dir)
+            emit(transcription_error(video_id, url, attempts, "stt-cleanup" if cleanup_error else "stt-invalid-output", str(error)), 1)
+        try:
+            provenance_data = {
+                "schema_version": 1,
+                "engine": "whisper-cli",
+                "language": args.language,
+                "model": model.name,
+                "model_sha256": sha256_file(model),
+                "transcript_sha256": sha256_file(transcript),
+                "duration_seconds": int(duration or 0),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            atomic_json(provenance, provenance_data)
+        except (OSError, ValueError) as error:
+            cleanup_error = cleanup_transcription_artifacts(transcript, output_dir)
+            emit(transcription_error(video_id, url, attempts, "stt-cleanup" if cleanup_error else "stt-provenance-failed", str(error)), 1)
+    emit(result_contract("machine-transcription", video_id, url, files=[transcript, provenance], attempts=attempts, transcription=provenance_data))
+
+
 def self_test():
     assert canonical_video("https://youtu.be/dQw4w9WgXcQ?si=ignored")[0] == "dQw4w9WgXcQ"
     assert canonical_video("https://www.youtube.com/shorts/dQw4w9WgXcQ")[1].endswith("v=dQw4w9WgXcQ")
@@ -1293,7 +1552,7 @@ def self_test():
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Fetch YouTube captions through yt-dlp.")
+    parser = argparse.ArgumentParser(description="Fetch YouTube captions and explicitly agent-owned local transcriptions.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     ensure = subparsers.add_parser("ensure", help="check or install yt-dlp")
@@ -1308,6 +1567,16 @@ def build_parser():
     captions.add_argument("--attempts", type=int, default=3)
     captions.add_argument("--backoff", type=float, default=2)
     captions.add_argument("--timeout", type=int, default=180)
+
+    transcribe_parser = subparsers.add_parser("transcribe", help="agent-owned local Whisper transcription after caption failure")
+    transcribe_parser.add_argument("url")
+    transcribe_parser.add_argument("--workspace", required=True)
+    transcribe_parser.add_argument("--queue-id", required=True)
+    transcribe_parser.add_argument("--output-dir")
+    transcribe_parser.add_argument("--model")
+    transcribe_parser.add_argument("--language", default="id")
+    transcribe_parser.add_argument("--timeout", type=int, default=600)
+    transcribe_parser.add_argument("--max-duration", type=int, default=MAX_TRANSCRIPTION_DURATION)
 
     queue = subparsers.add_parser("queue", help="create or extend a per-turn YouTube queue")
     queue.add_argument("--workspace", required=True)
@@ -1369,8 +1638,10 @@ def main():
                 "install_version": YTDLP_VERSION,
                 "error": error,
             }, 2)
+        if args.command == "transcribe":
+            transcribe(args)
         fetch_captions(args)
-    except ValueError as error:
+    except (ValueError, QueueError) as error:
         emit({"status": "invalid-input", "error": str(error)}, 2)
 
 
