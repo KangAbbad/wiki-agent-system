@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -24,6 +25,9 @@ LOCK_TIMEOUT_SECONDS = 0.5
 STATE_SCHEMA_VERSION = 1
 STATE_FILENAME = "retention.json"
 LOCK_FILENAME = "retention.lock"
+RECEIPT_DIRNAME = "youtube-receipts"
+RECEIPT_ID = re.compile(r"^[0-9a-f]{32}$")
+RECEIPT_REFERENCE = re.compile(r"^\s*receipt_id:\s*[\"']?([0-9a-f]{32})[\"']?\s*$", re.M)
 
 config_path = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-wiki" / "wiki-agent-system.json"
 defaults = {"autosave_days": 10, "queue_days": 30, "state_days": 30, "trash_days": 7, "max_bytes": 1073741824}
@@ -81,6 +85,40 @@ def files_older_than(root: Path, days: int, excluded: set[Path] | None = None) -
         except OSError:
             continue
     return expired
+
+
+def referenced_receipt_ids(wiki: Path) -> set[str]:
+    referenced = set()
+    for section in ("raw", "wiki", "output"):
+        root = wiki / section
+        if root.is_symlink() or not root.is_dir():
+            continue
+        for path in root.rglob("*.md"):
+            try:
+                if path.is_symlink() or not path.is_file():
+                    continue
+                content = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            referenced.update(RECEIPT_REFERENCE.findall(content))
+    return referenced
+
+
+def referenced_receipt_paths(wiki: Path, receipt_ids: set[str]) -> set[Path]:
+    active = wiki / ".sessions" / "wiki-agent-system" / RECEIPT_DIRNAME
+    quarantine = wiki / ".trash" / "state" / "wiki-agent-system" / RECEIPT_DIRNAME
+    protected = set()
+    for receipt_id in receipt_ids:
+        if not RECEIPT_ID.fullmatch(receipt_id):
+            continue
+        active_path = active / f"{receipt_id}.json"
+        if active_path.is_file() and not active_path.is_symlink():
+            protected.add(active_path)
+        if quarantine.is_dir() and not quarantine.is_symlink():
+            for path in quarantine.glob(f"{receipt_id}*.json"):
+                if path.is_file() and not path.is_symlink() and (path.stem == receipt_id or path.stem.startswith(f"{receipt_id}-")):
+                    protected.add(path)
+    return protected
 
 
 def storage_report(wiki: Path):
@@ -180,17 +218,24 @@ def destination_for(trash: Path, category: str, relative: Path) -> Path:
 def operational_files(wiki: Path, autosave_days: int, queue_days: int, state_days: int, state_path: Path, lock_path: Path):
     excluded = {state_path, lock_path}
     queue_root = wiki / ".sessions" / "wiki-agent-system" / "youtube-queues"
+    receipt_root = wiki / ".sessions" / "wiki-agent-system" / RECEIPT_DIRNAME
     queue_excluded = {
         path for path in queue_root.rglob("*") if path.is_file() and path.name.endswith(".lock")
     } if queue_root.is_dir() and not queue_root.is_symlink() else set()
+    receipt_ids = referenced_receipt_ids(wiki)
+    receipt_excluded = {
+        path for path in receipt_root.rglob("*") if path.is_file() and path.name.endswith(".lock")
+    } if receipt_root.is_dir() and not receipt_root.is_symlink() else set()
+    receipt_excluded.update(receipt_root / f"{receipt_id}.json" for receipt_id in receipt_ids)
     queue_files = files_older_than(queue_root, queue_days, queue_excluded)
     state_files = [
         path for path in files_older_than(wiki / ".sessions", state_days, excluded)
-        if not path.is_relative_to(queue_root)
+        if not path.is_relative_to(queue_root) and not path.is_relative_to(receipt_root)
     ]
+    receipt_files = files_older_than(receipt_root, state_days, receipt_excluded)
     return {
         "autosave": files_older_than(wiki / "inbox" / "autosave", autosave_days, excluded),
-        "state": state_files + queue_files,
+        "state": state_files + queue_files + receipt_files,
     }
 
 
@@ -287,7 +332,9 @@ def apply_retention(wiki: Path, autosave_days: int, queue_days: int, state_days:
                 return {}, [], empty_purge_summary(), "skipped", "not-due"
         expired = operational_files(wiki, autosave_days, queue_days, state_days, state_path, lock_path)
         quarantined = quarantine(wiki, expired)
-        purged = purge_quarantine(wiki, trash_days, set(map(Path, quarantined))) if scheduled else empty_purge_summary()
+        referenced = referenced_receipt_paths(wiki, referenced_receipt_ids(wiki))
+        protected = set(map(Path, quarantined)) | referenced
+        purged = purge_quarantine(wiki, trash_days, protected) if scheduled else empty_purge_summary()
         if scheduled:
             atomic_json_write(state_path, {"last_run_at": time.time(), "schema_version": STATE_SCHEMA_VERSION})
         return expired, quarantined, purged, "quarantined", None

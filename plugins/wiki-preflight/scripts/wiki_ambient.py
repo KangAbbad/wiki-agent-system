@@ -18,6 +18,9 @@ from urllib.parse import urlparse
 
 sys.dont_write_bytecode = True
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from youtube_fallback import YOUTUBE_HOSTS, canonical_video, read_caption_receipt
+
 
 CONFIG_TEMPLATE = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
 USER_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-wiki" / "wiki-agent-system.json"
@@ -793,7 +796,7 @@ def source_slug(value: str) -> str:
     return slug[:80] or "source"
 
 
-def canonicalize(cwd: str, source: str, source_url: str, title: str):
+def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=None):
     """Promote only supplied, attributable, non-sensitive source material to raw/."""
     load()
     route = json.loads(capture_resolve(cwd))
@@ -802,10 +805,31 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str):
     parsed = urlparse(source_url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise SystemExit("source URL must be an absolute http(s) URL")
+    receipt = None
+    if (parsed.hostname or "").lower().rstrip(".") in YOUTUBE_HOSTS:
+        try:
+            video_id, source_url = canonical_video(source_url)
+        except ValueError as error:
+            raise SystemExit(f"source URL is not a valid YouTube video: {error}") from error
+        if not receipt_id:
+            raise SystemExit("YouTube caption canonicalization requires --receipt")
+        try:
+            receipt = read_caption_receipt(
+                route["local_wiki"],
+                receipt_id,
+                expected_url=source_url,
+                expected_video_id=video_id,
+                verify_files=True,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            raise SystemExit(f"caption receipt rejected: {error}") from error
     clean_title = title.strip()
     if not clean_title or "\n" in clean_title or SENSITIVE.search(clean_title):
         raise SystemExit("source title is empty, multiline, or sensitive")
-    source_path = Path(source).expanduser().resolve()
+    source_candidate = Path(source).expanduser()
+    if source_candidate.is_symlink():
+        raise SystemExit("source must not be a symlink")
+    source_path = source_candidate.resolve()
     if not source_path.is_file():
         raise SystemExit("source must be a readable file")
     if source_path.name.startswith(".env"):
@@ -813,27 +837,46 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str):
     if source_path.stat().st_size > 2 * 1024 * 1024:
         raise SystemExit("source exceeds 2 MiB; store a source reference instead")
     try:
-        body = source_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
+        body_bytes = source_path.read_bytes()
+        body = body_bytes.decode("utf-8")
+    except (OSError, UnicodeDecodeError):
         raise SystemExit("source must be UTF-8 text")
     if not body.strip() or SENSITIVE.search(body):
         raise SystemExit("source is empty or contains sensitive material")
-    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(body_bytes).hexdigest()
+    if receipt:
+        try:
+            source_relative = source_path.relative_to(Path(route["local_wiki"]).resolve()).as_posix()
+        except ValueError as error:
+            raise SystemExit("caption source must stay inside the active Wiki") from error
+        matching = [entry for entry in receipt["files"] if entry["path"] == source_relative]
+        if len(matching) != 1 or matching[0]["sha256"] != digest:
+            raise SystemExit("source does not match the caption receipt file and hash")
     destination = Path(route["local_wiki"]) / "raw"
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     output = destination / f"{source_slug(clean_title)}-{digest[:12]}.md"
+    if receipt and output.is_symlink():
+        raise SystemExit("existing canonical evidence is a symlink")
     origin_workspace = workspace_identity(route, Path(route["cwd"]))
     canonical_uri = canonical_capture_uri("workspace", str(origin_workspace), f"source-{digest}")
     if not output.exists():
         retrieved_at = datetime.now(timezone.utc)
         retrieved = retrieved_at.date().isoformat()
+        receipt_fields = (
+            f"receipt_id: {receipt['receipt_id']}\n"
+            f"transcript_sha256: {digest}\n"
+            "provenance_class: caption\n"
+            "evidence_status: verified\n"
+            if receipt
+            else ""
+        )
         content = f"""---
 type: raw-source
 title: {clean_title}
 source_url: {source_url}
 retrieved: {retrieved}
 content_sha256: {digest}
-scope: workspace
+{receipt_fields}scope: workspace
 canonical_uri: {json.dumps(canonical_uri)}
 origin_workspace: {json.dumps(str(origin_workspace))}
 status: canonical
@@ -845,9 +888,25 @@ valid_until: null
 # {clean_title}
 
 {body.rstrip()}
-"""
+        """
         atomic_write(output, content)
-    print(json.dumps({"path": str(output), "status": "canonical-evidence", "canonical_uri": canonical_uri, "source_url": source_url, "content_sha256": digest}))
+    if receipt:
+        try:
+            existing = frontmatter_fields(output.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SystemExit) as error:
+            raise SystemExit("existing canonical evidence is not receipt-bound") from error
+        if any(existing.get(key) != value for key, value in {
+            "receipt_id": receipt["receipt_id"],
+            "transcript_sha256": digest,
+            "content_sha256": digest,
+            "provenance_class": "caption",
+            "evidence_status": "verified",
+        }.items()):
+            raise SystemExit("existing canonical evidence is not receipt-bound")
+    result = {"path": str(output), "status": "canonical-evidence", "canonical_uri": canonical_uri, "source_url": source_url, "content_sha256": digest}
+    if receipt:
+        result.update({"receipt_id": receipt["receipt_id"], "transcript_sha256": digest})
+    print(json.dumps(result))
 
 
 def intent_gate(prompt: str) -> dict:
@@ -1052,6 +1111,7 @@ def main():
     canonicalize_parser.add_argument("--source", required=True)
     canonicalize_parser.add_argument("--source-url", required=True)
     canonicalize_parser.add_argument("--title", required=True)
+    canonicalize_parser.add_argument("--receipt", "--receipt-id", dest="receipt_id")
     transition_parser = commands.add_parser("transition")
     transition_parser.add_argument("--cwd", default=".")
     transition_parser.add_argument("--record", required=True)
@@ -1086,7 +1146,7 @@ def main():
             args.scope,
         )
     elif args.command == "canonicalize":
-        canonicalize(args.cwd, args.source, args.source_url, args.title)
+        canonicalize(args.cwd, args.source, args.source_url, args.title, args.receipt_id)
     elif args.command == "transition":
         transition_record(args.cwd, args.record, args.status, args.supersedes)
     elif args.command == "retrieve":

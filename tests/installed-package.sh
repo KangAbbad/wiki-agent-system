@@ -18,6 +18,8 @@ for document in \
   ! grep -Fq '$PLUGIN_DATA' "$document"
 done
 grep -q '"timeout": 45' "$root/plugin/hooks/hooks.json"
+test "$(grep -c 'provision.py' "$root/plugin/hooks/hooks.json")" -eq 3
+test "$(grep -c 'PLUGIN_DATA/current/hooks/preflight.py' "$root/plugin/hooks/hooks.json")" -eq 3
 mkdir "$root/workspace"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"SessionStart\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 test -f "$root/workspace/.wiki/.wiki-agent-system.json"

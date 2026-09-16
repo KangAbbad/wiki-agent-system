@@ -13,9 +13,11 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, urlparse
 
 try:
@@ -41,7 +43,10 @@ TIMEOUT_MAX = 600
 QUEUE_SCHEMA_VERSION = 2
 QUEUE_LEGACY_SCHEMA_VERSION = 1
 QUEUE_DIRNAME = "youtube-queues"
+RECEIPT_SCHEMA_VERSION = 1
+RECEIPT_DIRNAME = "youtube-receipts"
 QUEUE_ID = re.compile(r"^[0-9a-f]{32}$")
+RECEIPT_ID = re.compile(r"^[0-9a-f]{32}$")
 QUEUE_STATES = frozenset({"pending", "running", "ok", "no-captions", "metadata-only", "error", "blocked-install"})
 QUEUE_TERMINAL_STATES = frozenset({"ok", "no-captions", "metadata-only", "error", "blocked-install"})
 QUEUE_LOCK_TIMEOUT = 0.5
@@ -136,6 +141,124 @@ def safe_transcription(data):
     return data
 
 
+def safe_file_names(paths):
+    names = []
+    for value in (paths or []):
+        if not isinstance(value, (str, Path)):
+            continue
+        name = Path(value).name
+        if name and name not in {".", ".."} and len(name) <= 255:
+            names.append(name)
+    return names
+
+
+def caption_receipt_parts(value):
+    if not isinstance(value, str) or not value or len(value) > 400 or "\x00" in value or "\\" in value:
+        raise ValueError("caption receipt file path is invalid")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.parts[:2] != ("inbox", "youtube")
+        or path.suffix != ".vtt"
+    ):
+        raise ValueError("caption receipt file path is invalid")
+    return path.parts
+
+
+def receipt_file_path(wiki, value):
+    parts = caption_receipt_parts(value)
+    wiki = Path(wiki).expanduser().resolve()
+    if not valid_wiki(wiki):
+        raise ValueError("caption receipt requires a valid local LLM Wiki")
+    path = wiki
+    for part in parts:
+        path /= part
+        if path.is_symlink():
+            raise ValueError("caption receipt file path is a symlink")
+    try:
+        if not path.resolve().is_relative_to(wiki):
+            raise ValueError("caption receipt file path leaves the Wiki")
+    except OSError as error:
+        raise ValueError("caption receipt file path is unreadable") from error
+    return path
+
+
+def validate_caption_receipt(data, *, wiki=None, expected_url=None, expected_video_id=None, verify_files=False):
+    fields = {
+        "schema_version",
+        "receipt_id",
+        "canonical_url",
+        "video_id",
+        "status",
+        "provenance_class",
+        "attempt",
+        "attempted_at",
+        "files",
+    }
+    if not isinstance(data, dict) or set(data) != fields or data.get("schema_version") != RECEIPT_SCHEMA_VERSION:
+        raise ValueError("caption receipt schema is invalid")
+    if not isinstance(data.get("receipt_id"), str) or not RECEIPT_ID.fullmatch(data["receipt_id"]):
+        raise ValueError("caption receipt id is invalid")
+    try:
+        video_id, canonical = canonical_video(data.get("canonical_url"))
+    except (TypeError, ValueError) as error:
+        raise ValueError("caption receipt URL is invalid") from error
+    if canonical != data.get("canonical_url") or video_id != data.get("video_id"):
+        raise ValueError("caption receipt URL is not canonical")
+    if expected_url is not None and canonical != expected_url:
+        raise ValueError("caption receipt URL does not match the requested video")
+    if expected_video_id is not None and video_id != expected_video_id:
+        raise ValueError("caption receipt video id does not match the requested video")
+    if data.get("status") != "ok" or data.get("provenance_class") != "caption":
+        raise ValueError("caption receipt provenance is invalid")
+    if type(data.get("attempt")) is not int or not 1 <= data["attempt"] <= 3:
+        raise ValueError("caption receipt attempt is invalid")
+    attempted_at = data.get("attempted_at")
+    if not isinstance(attempted_at, str) or not 1 <= len(attempted_at) <= 40 or "\n" in attempted_at or "\r" in attempted_at:
+        raise ValueError("caption receipt timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(attempted_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError("caption receipt timestamp is invalid") from error
+    if parsed.tzinfo is None:
+        raise ValueError("caption receipt timestamp must include a timezone")
+    files = data.get("files")
+    if not isinstance(files, list) or not 1 <= len(files) <= 20:
+        raise ValueError("caption receipt files are invalid")
+    seen = set()
+    for entry in files:
+        if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
+            raise ValueError("caption receipt file entry is invalid")
+        parts = caption_receipt_parts(entry.get("path"))
+        if parts in seen:
+            raise ValueError("caption receipt contains duplicate files")
+        seen.add(parts)
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+            raise ValueError("caption receipt file hash is invalid")
+        if verify_files:
+            path = receipt_file_path(wiki, entry["path"])
+            try:
+                metadata = path.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_size <= 0:
+                    raise ValueError("caption receipt file is not a regular VTT")
+                actual = sha256_file(path)
+            except OSError as error:
+                raise ValueError("caption receipt file is unreadable") from error
+            if actual != entry["sha256"]:
+                raise ValueError("caption receipt file hash mismatch")
+    return data
+
+
+def valid_caption_receipt(data, *, expected_url=None, expected_video_id=None):
+    try:
+        validate_caption_receipt(data, expected_url=expected_url, expected_video_id=expected_video_id)
+    except (OSError, TypeError, ValueError):
+        return False
+    return True
+
+
 def result_contract(
     status,
     video_id,
@@ -149,11 +272,14 @@ def result_contract(
     metadata=None,
     transcription=None,
     evidence_reason=None,
+    receipt=None,
 ):
     if status not in RESULT_STATUSES:
         raise ValueError("unsupported helper result status")
-    if status == "ok" and not files:
-        raise ValueError("ok result requires fresh caption files")
+    receipt_valid = valid_caption_receipt(receipt, expected_url=url, expected_video_id=video_id)
+    receipt_files = [PurePosixPath(entry["path"]).name for entry in receipt["files"]] if receipt_valid else []
+    if status == "ok" and (not files or not receipt_valid or receipt_files != safe_file_names(files)):
+        raise ValueError("ok result requires fresh caption files and a valid receipt")
     if status == "metadata-only" and not safe_metadata(metadata):
         raise ValueError("metadata-only result requires metadata")
     if status == "machine-transcription" and not files:
@@ -185,8 +311,9 @@ def result_contract(
         "evidence_eligible": status in {"ok", "metadata-only"},
         "transcript_eligible": status == "ok",
         "evidence_reason": safe_text(str(reason), 120),
-        "files": [str(path) for path in (files or [])],
-        "existing_files_ignored": [str(path) for path in (existing_files_ignored or [])],
+        "files": safe_file_names(files),
+        "existing_files_ignored": safe_file_names(existing_files_ignored),
+        "receipt": receipt if status == "ok" else None,
         "attempts": safe_attempts(attempts),
         "metadata": safe_metadata(metadata) if status == "metadata-only" else None,
         "transcription": safe_transcription(transcription) if status == "machine-transcription" else None,
@@ -239,20 +366,29 @@ def queue_id_for(session_id, turn_id):
     return hashlib.sha256(owner.encode("utf-8")).hexdigest()[:32]
 
 
-def queue_directory(wiki):
+def private_state_directory(wiki, dirname, label):
     wiki = Path(wiki).expanduser().resolve()
     if not valid_wiki(wiki) or wiki.is_symlink():
-        raise QueueError("queue requires a valid local LLM Wiki")
+        raise QueueError(f"{label} requires a valid local LLM Wiki")
     current = wiki
-    for name in (".sessions", "wiki-agent-system", QUEUE_DIRNAME):
+    for name in (".sessions", "wiki-agent-system", dirname):
         current = current / name
         if current.is_symlink() or (current.exists() and not current.is_dir()):
-            raise QueueError("queue state path is not a private local directory")
-    try:
-        current.mkdir(mode=0o700, parents=True, exist_ok=True)
-    except OSError as error:
-        raise QueueError(f"queue state directory unavailable: {safe_text(str(error), 160)}")
+            raise QueueError(f"{label} state path is not a private local directory")
+        try:
+            current.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.chmod(current, 0o700)
+        except OSError as error:
+            raise QueueError(f"{label} state directory unavailable: {safe_text(str(error), 160)}")
     return current
+
+
+def queue_directory(wiki):
+    return private_state_directory(wiki, QUEUE_DIRNAME, "queue")
+
+
+def receipt_directory(wiki):
+    return private_state_directory(wiki, RECEIPT_DIRNAME, "caption receipt")
 
 
 def queue_paths(wiki, queue_id):
@@ -275,6 +411,27 @@ def atomic_queue_write(path, data):
     temporary = None
     try:
         fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".queue-", text=True)
+        with os.fdopen(fd, "w") as file:
+            json.dump(data, file, ensure_ascii=False, sort_keys=True)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        if temporary:
+            Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def atomic_receipt_write(path, data):
+    path = Path(path)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise QueueError("caption receipt path is a symlink")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".receipt-", text=True)
         with os.fdopen(fd, "w") as file:
             json.dump(data, file, ensure_ascii=False, sort_keys=True)
             file.write("\n")
@@ -324,19 +481,53 @@ def release_file_lock(fd):
         os.close(fd)
 
 
+@contextmanager
+def caption_lock(wiki, url, timeout):
+    queue_directory(wiki)
+    fd, reason = acquire_file_lock(url_lock_path(wiki, url), timeout)
+    if fd is None:
+        raise QueueError(f"caption lock unavailable: {reason}")
+    try:
+        yield
+    finally:
+        release_file_lock(fd)
+
+
 def queue_timestamp(value, required=True):
     if value is None and not required:
         return True
     return isinstance(value, str) and 1 <= len(value) <= 40 and "\n" not in value and "\r" not in value
 
 
-def queue_item_contract_defaults(item):
+def queue_item_contract_defaults(item, wiki=None):
     status = item.get("status")
-    provenance_class = "caption" if status == "ok" and item.get("files") else "metadata" if status == "metadata-only" else "none"
-    evidence_eligible = status in {"ok", "metadata-only"}
-    transcript_eligible = status == "ok"
+    receipt = item.get("receipt")
+    receipt_shape_valid = status == "ok" and valid_caption_receipt(
+        receipt,
+        expected_url=item.get("url"),
+        expected_video_id=item.get("video_id"),
+    )
+    receipt_valid = receipt_shape_valid
+    if receipt_valid and wiki is not None:
+        try:
+            validate_caption_receipt(
+                receipt,
+                wiki=wiki,
+                expected_url=item.get("url"),
+                expected_video_id=item.get("video_id"),
+                verify_files=True,
+            )
+        except (OSError, TypeError, ValueError):
+            receipt_valid = False
+    receipt_files = [PurePosixPath(entry["path"]).name for entry in receipt.get("files", [])] if receipt_valid else []
+    files = item.get("files") if isinstance(item.get("files"), list) else []
+    files_match_receipt = files == receipt_files
+    caption_valid = receipt_valid and files_match_receipt
+    provenance_class = "caption" if caption_valid else "metadata" if status == "metadata-only" else "none"
+    evidence_eligible = caption_valid or status == "metadata-only"
+    transcript_eligible = caption_valid
     reason = {
-        "ok": "fresh-regular-vtt",
+        "ok": "fresh-regular-vtt" if caption_valid else "caption-receipt-invalid" if receipt is not None else "caption-receipt-missing",
         "no-captions": "no-fresh-caption",
         "metadata-only": "metadata-only-not-transcript",
         "error": "caption-route-failed",
@@ -347,12 +538,16 @@ def queue_item_contract_defaults(item):
         "evidence_eligible": evidence_eligible,
         "transcript_eligible": transcript_eligible,
         "evidence_reason": reason,
-        "attempts": [],
-        "metadata": None,
+        "attempts": item.get("attempts", []),
+        "metadata": item.get("metadata"),
+        "receipt": receipt if receipt_shape_valid else None,
     }
+    if status == "ok" and not caption_valid:
+        defaults["files"] = []
+        defaults["receipt"] = None
     changed = False
     for key, value in defaults.items():
-        if key not in item:
+        if key not in item or item.get(key) != value:
             item[key] = value
             changed = True
     return changed
@@ -419,6 +614,7 @@ def validate_queue(data, queue_id, schema_version=None):
         "helper_status",
         "error_class",
         "files",
+        "receipt",
     }
     if expected_version in {QUEUE_LEGACY_SCHEMA_VERSION, QUEUE_SCHEMA_VERSION}:
         allowed |= contract_fields
@@ -455,18 +651,30 @@ def validate_queue(data, queue_id, schema_version=None):
             not isinstance(name, str) or not name or len(name) > 255 or Path(name).name != name for name in files
         ):
             return "invalid", "queue item files are invalid"
+        receipt = item.get("receipt")
+        if receipt is not None and not valid_caption_receipt(
+            receipt,
+            expected_url=item["url"],
+            expected_video_id=item["video_id"],
+        ):
+            return "invalid", "queue item receipt is invalid"
+        receipt_files = [PurePosixPath(entry["path"]).name for entry in receipt["files"]] if receipt else []
+        if receipt and files != receipt_files:
+            return "invalid", "queue item receipt files do not match"
         present = contract_fields & set(item)
         if expected_version == QUEUE_SCHEMA_VERSION and present != contract_fields:
             return "invalid", "queue item evidence contract is incomplete"
         if present and present != contract_fields:
             return "invalid", "queue item evidence contract is incomplete"
         if present:
-            expected_provenance = "caption" if item["status"] == "ok" and files else "metadata" if item["status"] == "metadata-only" else "none"
+            legacy_unreceipted = item["status"] == "ok" and receipt is None
+            caption_bound = item["status"] == "ok" and ((receipt is not None) or legacy_unreceipted) and bool(files)
+            expected_provenance = "caption" if caption_bound else "metadata" if item["status"] == "metadata-only" else "none"
             if item["provenance_class"] != expected_provenance or item["provenance_class"] not in PROVENANCE_CLASSES:
                 return "invalid", "queue item provenance is invalid"
             if type(item["evidence_eligible"]) is not bool or type(item["transcript_eligible"]) is not bool:
                 return "invalid", "queue item evidence eligibility is invalid"
-            if item["evidence_eligible"] != (item["status"] in {"ok", "metadata-only"}) or item["transcript_eligible"] != (item["status"] == "ok"):
+            if item["evidence_eligible"] != (caption_bound or item["status"] == "metadata-only") or item["transcript_eligible"] != caption_bound:
                 return "invalid", "queue item evidence eligibility is inconsistent"
             if not isinstance(item["evidence_reason"], str) or not 1 <= len(item["evidence_reason"]) <= 120 or "\n" in item["evidence_reason"] or "\r" in item["evidence_reason"]:
                 return "invalid", "queue item evidence reason is invalid"
@@ -535,6 +743,7 @@ def new_queue_item(url, timestamp):
         "evidence_reason": "not-attempted",
         "attempts": [],
         "metadata": None,
+        "receipt": None,
     }
 
 
@@ -584,7 +793,7 @@ def ensure_queue(wiki, urls, queue_id):
             additions = [new_queue_item(url, now) for url in urls if url not in existing]
             changed = migrated
             for item in data["items"]:
-                changed = queue_item_contract_defaults(item) or changed
+                changed = queue_item_contract_defaults(item, wiki) or changed
             if additions or changed:
                 data["items"].extend(additions)
                 data["updated_at"] = now
@@ -616,7 +825,7 @@ def queue_snapshot(wiki, queue_id):
     status, data, error = read_queue(path, queue_id)
     if status == "valid":
         for item in data["items"]:
-            queue_item_contract_defaults(item)
+            queue_item_contract_defaults(item, wiki)
         return queue_summary(data)
     return {"status": status, "queue_id": queue_id, "error": error}
 
@@ -645,7 +854,7 @@ def claim_queue_items(wiki, queue_id, limit, lease_seconds):
         stamp = datetime.now(timezone.utc).isoformat()
         changed = migrated
         for item in data["items"]:
-            changed = queue_item_contract_defaults(item) or changed
+            changed = queue_item_contract_defaults(item, wiki) or changed
         for item in data["items"]:
             if item["status"] == "running" and item["lease_until"] is not None and item["lease_until"] <= now:
                 item["status"] = "pending"
@@ -678,13 +887,18 @@ def queue_file_names(data, output_dir):
         if not isinstance(value, str):
             continue
         path = Path(value)
-        if path.parent == output_dir and path == output_dir / path.name and path.name not in {".", ".."}:
-            try:
-                mode = path.lstat().st_mode
-            except OSError:
+        if path.is_absolute():
+            if path.parent != output_dir or path != output_dir / path.name:
                 continue
-            if stat.S_ISREG(mode):
-                names.append(path.name)
+        elif path.name != value or path.name in {".", ".."}:
+            continue
+        candidate = output_dir / path.name
+        try:
+            mode = candidate.lstat().st_mode
+        except OSError:
+            continue
+        if stat.S_ISREG(mode):
+            names.append(path.name)
     return names[:20]
 
 
@@ -742,35 +956,43 @@ def run_queue_item(claim, workspace, wiki, deadline):
         return {"defer": True, "error_class": "drain-deadline"}
     timeout = min(DRAIN_PER_URL_TIMEOUT, max(TIMEOUT_MIN, math.floor(remaining - 0.05)))
     output_dir = (wiki / "inbox" / "youtube").resolve()
-    lock_path = url_lock_path(wiki, claim["url"])
-    fd, reason = acquire_file_lock(lock_path)
-    if fd is None:
-        return {"defer": True, "error_class": reason}
-    try:
-        command = [
-            sys.executable,
-            str(Path(__file__).resolve()),
-            "captions",
-            claim["url"],
-            "--attempts",
-            "1",
-            "--backoff",
-            "0",
-            "--timeout",
-            str(timeout),
-            "--output-dir",
-            str(output_dir),
-        ]
-        process = run_command(command, timeout, env=os.environ.copy(), cwd=str(workspace))
-    finally:
-        release_file_lock(fd)
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "captions",
+        claim["url"],
+        "--attempts",
+        "1",
+        "--backoff",
+        "0",
+        "--timeout",
+        str(timeout),
+        "--output-dir",
+        str(output_dir),
+    ]
+    process = run_command(command, timeout, env=os.environ.copy(), cwd=str(workspace))
     if not isinstance(process, subprocess.CompletedProcess):
         return {"state": "error", "helper_status": "error", "error_class": "timeout" if isinstance(process, subprocess.TimeoutExpired) else "process-failed", "files": []}
     data = parse_helper_result(process.stdout)
     if not data or data.get("url") != claim["url"] or data.get("video_id") != claim["video_id"]:
         return {"state": "error", "helper_status": "error", "error_class": "invalid-helper-output", "files": []}
     helper_status = safe_text(str(data.get("status") or "unknown"), 80)
-    files = queue_file_names(data, output_dir)
+    receipt = None
+    receipt_error = None
+    if helper_status == "ok":
+        candidate = data.get("receipt")
+        receipt_id = candidate.get("receipt_id") if isinstance(candidate, dict) else None
+        try:
+            receipt = read_caption_receipt(
+                wiki,
+                receipt_id,
+                expected_url=claim["url"],
+                expected_video_id=claim["video_id"],
+                verify_files=True,
+            )
+        except (OSError, TypeError, ValueError) as error:
+            receipt_error = safe_text(str(error), 120)
+    files = [PurePosixPath(entry["path"]).name for entry in receipt["files"]] if receipt else queue_file_names(data, output_dir)
     state = {
         "ok": "ok",
         "no-captions": "no-captions",
@@ -783,10 +1005,13 @@ def run_queue_item(claim, workspace, wiki, deadline):
         error_class = data["attempts"][-1].get("error_class")
     error_class = safe_text(str(error_class), 80) if error_class else None
     contract_status = helper_status if helper_status in RESULT_STATUSES else "error"
-    if contract_status == "ok" and not files:
+    if contract_status == "ok" and (not receipt or not files):
         contract_status = "error"
         state = "error"
-        error_class = "missing-evidence-file"
+        error_class = "invalid-caption-receipt"
+        files = []
+        if receipt_error:
+            data["error"] = receipt_error
     contract = result_contract(
         contract_status,
         claim["video_id"],
@@ -797,6 +1022,7 @@ def run_queue_item(claim, workspace, wiki, deadline):
         error_class=error_class,
         error=data.get("error"),
         metadata=data.get("metadata"),
+        receipt=receipt,
     )
     return {
         "state": state,
@@ -809,6 +1035,7 @@ def run_queue_item(claim, workspace, wiki, deadline):
         "evidence_reason": contract["evidence_reason"],
         "attempts": contract["attempts"],
         "metadata": contract["metadata"],
+        "receipt": contract["receipt"],
     }
 
 
@@ -840,6 +1067,7 @@ def finish_queue_claim(wiki, queue_id, claim, outcome):
             item["evidence_reason"] = outcome.get("evidence_reason", "not-available")
             item["attempts"] = outcome.get("attempts", [])
             item["metadata"] = outcome.get("metadata")
+            item["receipt"] = outcome.get("receipt")
             item["lease_until"] = None
         item["updated_at"] = stamp
         if outcome.get("defer"):
@@ -909,7 +1137,7 @@ def retry_queue_item(workspace, queue_id, url):
         if status != "valid":
             raise QueueError(error or "queue record unavailable")
         for item in data["items"]:
-            queue_item_contract_defaults(item)
+            queue_item_contract_defaults(item, wiki)
         item = next((item for item in data["items"] if item["url"] == canonical), None)
         if not item:
             raise QueueError("URL is not present in queue")
@@ -931,6 +1159,7 @@ def retry_queue_item(workspace, queue_id, url):
         item["evidence_reason"] = "not-attempted"
         item["attempts"] = []
         item["metadata"] = None
+        item["receipt"] = None
         data["updated_at"] = stamp
         atomic_queue_write(path, data)
         return queue_summary(data)
@@ -1181,6 +1410,9 @@ def fetch_captions(args):
     if not output_dir.is_dir():
         emit(result_contract("error", video_id, url, error_class="invalid-output-dir"), 2)
 
+    workspace_wiki = nearest_wiki(Path.cwd())
+    if not workspace_wiki or not valid_wiki(workspace_wiki):
+        emit(result_contract("error", video_id, url, error_class="invalid-wiki", error="caption receipts require a valid local LLM Wiki"), 2)
     ignored_files = set(caption_snapshot(output_dir, video_id, args.sub_format))
     attempts = []
     caption_status = None
@@ -1189,36 +1421,95 @@ def fetch_captions(args):
         if remaining <= 0:
             attempts.append({"route": "caption", "attempt": attempt, "error_class": "deadline-exhausted"})
             break
-        attempt_baseline = caption_snapshot(output_dir, video_id, args.sub_format)
-        process = run_command(command + [
-            "--ignore-config",
-            "--no-playlist",
-            "--no-progress",
-            "--no-overwrites",
-            "--skip-download",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs",
-            args.languages,
-            "--sub-format",
-            args.sub_format,
-            "--output",
-            str(output_dir / "%(id)s.%(ext)s"),
-            url,
-        ], remaining)
-        attempt_files = changed_caption_files(output_dir, video_id, args.sub_format, attempt_baseline)
-        if isinstance(process, subprocess.CompletedProcess):
-            output = f"{process.stdout}\n{process.stderr}"
-            attempts.append({
-                "route": "caption",
-                "attempt": attempt,
-                "returncode": process.returncode,
-                "error_class": error_class(output) if process.returncode else None,
-            })
-            if process.returncode == 0:
-                symlink_files = [path for path in attempt_files if path.is_symlink()]
-                if symlink_files:
-                    cleanup_failures = remove_caption_files(symlink_files, output_dir)
+        try:
+            with caption_lock(workspace_wiki, url, max(QUEUE_LOCK_TIMEOUT, deadline - time.monotonic())):
+                attempt_baseline = caption_snapshot(output_dir, video_id, args.sub_format)
+                ignored_files.update(attempt_baseline)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    attempts.append({"route": "caption", "attempt": attempt, "error_class": "deadline-exhausted"})
+                    break
+                process = run_command(command + [
+                    "--ignore-config",
+                    "--no-playlist",
+                    "--no-progress",
+                    "--no-overwrites",
+                    "--skip-download",
+                    "--write-subs",
+                    "--write-auto-subs",
+                    "--sub-langs",
+                    args.languages,
+                    "--sub-format",
+                    args.sub_format,
+                    "--output",
+                    str(output_dir / "%(id)s.%(ext)s"),
+                    url,
+                ], remaining)
+                attempt_files = changed_caption_files(output_dir, video_id, args.sub_format, attempt_baseline)
+                if isinstance(process, subprocess.CompletedProcess):
+                    output = f"{process.stdout}\n{process.stderr}"
+                    attempts.append({
+                        "route": "caption",
+                        "attempt": attempt,
+                        "returncode": process.returncode,
+                        "error_class": error_class(output) if process.returncode else None,
+                    })
+                    if process.returncode == 0:
+                        symlink_files = [path for path in attempt_files if path.is_symlink()]
+                        if symlink_files:
+                            cleanup_failures = remove_caption_files(attempt_files, output_dir)
+                            if cleanup_failures:
+                                emit(result_contract(
+                                    "error",
+                                    video_id,
+                                    url,
+                                    attempts=attempts,
+                                    error_class="caption-cleanup",
+                                    error=f"failed to reject symlink caption output: {'; '.join(cleanup_failures)}",
+                                ), 1)
+                            emit(result_contract(
+                                "error",
+                                video_id,
+                                url,
+                                attempts=attempts,
+                                error_class="caption-symlink",
+                                error="caption output contains a symlink",
+                            ), 1)
+                        files = []
+                        for path in attempt_files:
+                            try:
+                                if stat.S_ISREG(path.lstat().st_mode):
+                                    files.append(path)
+                            except OSError:
+                                continue
+                        if files:
+                            try:
+                                receipt = write_caption_receipt(workspace_wiki, url, video_id, attempt, files)
+                            except (OSError, TypeError, ValueError) as error:
+                                cleanup_failures = remove_caption_files(attempt_files, output_dir)
+                                detail = safe_text(str(error), 160)
+                                if cleanup_failures:
+                                    detail = f"{detail}; cleanup failed: {'; '.join(cleanup_failures)}"
+                                emit(result_contract(
+                                    "error",
+                                    video_id,
+                                    url,
+                                    attempts=attempts,
+                                    error_class="caption-receipt",
+                                    error=detail,
+                                ), 1)
+                            emit(result_contract("ok", video_id, url, files=files, attempts=attempts, receipt=receipt))
+                        caption_status = "stale-captions-ignored" if ignored_files else "no-captions"
+                        break
+                else:
+                    attempts.append({
+                        "route": "caption",
+                        "attempt": attempt,
+                        "error_class": "timeout" if isinstance(process, subprocess.TimeoutExpired) else "process-failed",
+                    })
+                if attempt_files:
+                    cleanup_failures = remove_caption_files(attempt_files, output_dir)
+                    ignored_files.difference_update(attempt_files)
                     if cleanup_failures:
                         emit(result_contract(
                             "error",
@@ -1226,38 +1517,11 @@ def fetch_captions(args):
                             url,
                             attempts=attempts,
                             error_class="caption-cleanup",
-                            error=f"failed to reject symlink caption output: {'; '.join(cleanup_failures)}",
+                            error=f"failed to clean captions written by a failed attempt: {'; '.join(cleanup_failures)}",
                         ), 1)
-                    attempt_files = [path for path in attempt_files if path not in symlink_files]
-                files = []
-                for path in attempt_files:
-                    try:
-                        if stat.S_ISREG(path.lstat().st_mode):
-                            files.append(path)
-                    except OSError:
-                        continue
-                if files:
-                    emit(result_contract("ok", video_id, url, files=files, attempts=attempts))
-                caption_status = "stale-captions-ignored" if ignored_files else "no-captions"
-                break
-        else:
-            attempts.append({
-                "route": "caption",
-                "attempt": attempt,
-                "error_class": "timeout" if isinstance(process, subprocess.TimeoutExpired) else "process-failed",
-            })
-        if attempt_files:
-            cleanup_failures = remove_caption_files(attempt_files, output_dir)
-            ignored_files.difference_update(attempt_files)
-            if cleanup_failures:
-                emit(result_contract(
-                    "error",
-                    video_id,
-                    url,
-                    attempts=attempts,
-                    error_class="caption-cleanup",
-                    error=f"failed to clean captions written by a failed attempt: {'; '.join(cleanup_failures)}",
-                ), 1)
+        except QueueError as error:
+            attempts.append({"route": "caption", "attempt": attempt, "error_class": "lock-unavailable"})
+            emit(result_contract("error", video_id, url, attempts=attempts, error_class="caption-lock", error=str(error)), 1)
         if attempt < args.attempts:
             remaining = deadline - time.monotonic()
             delay = min(args.backoff * attempt, max(0, remaining))
@@ -1323,6 +1587,82 @@ def sha256_file(path):
         for chunk in iter(lambda: file.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def caption_receipt_path(wiki, receipt_id):
+    if not isinstance(receipt_id, str) or not RECEIPT_ID.fullmatch(receipt_id):
+        raise ValueError("caption receipt id is invalid")
+    return receipt_directory(wiki) / f"{receipt_id}.json"
+
+
+def write_caption_receipt(wiki, url, video_id, attempt, files):
+    entries = []
+    for path in sorted(files or [], key=lambda value: Path(value).name):
+        path = Path(path).expanduser()
+        if path.is_symlink():
+            raise ValueError("caption receipt input is a symlink")
+        path = path.resolve()
+        try:
+            relative = path.relative_to(Path(wiki).expanduser().resolve()).as_posix()
+            parts = caption_receipt_parts(relative)
+            metadata = path.lstat()
+            if receipt_file_path(wiki, relative) != path:
+                raise ValueError("caption receipt input is not a lexical Wiki path")
+        except (OSError, ValueError):
+            raise ValueError("caption receipt input is outside the active Wiki")
+        if path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_size <= 0:
+            raise ValueError("caption receipt input is not a regular VTT")
+        before = caption_fingerprint(path)
+        digest = sha256_file(path)
+        if before is None or before != caption_fingerprint(path):
+            raise ValueError("caption changed while creating caption receipt")
+        entries.append({"path": PurePosixPath(*parts).as_posix(), "sha256": digest})
+    receipt = {
+        "schema_version": RECEIPT_SCHEMA_VERSION,
+        "receipt_id": uuid.uuid4().hex,
+        "canonical_url": url,
+        "video_id": video_id,
+        "status": "ok",
+        "provenance_class": "caption",
+        "attempt": attempt,
+        "attempted_at": datetime.now(timezone.utc).isoformat(),
+        "files": entries,
+    }
+    if not entries:
+        raise ValueError("caption receipt requires at least one VTT")
+    path = caption_receipt_path(wiki, receipt["receipt_id"])
+    atomic_receipt_write(path, receipt)
+    try:
+        return read_caption_receipt(
+            wiki,
+            receipt["receipt_id"],
+            expected_url=url,
+            expected_video_id=video_id,
+            verify_files=True,
+        )
+    except (OSError, TypeError, ValueError):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def read_caption_receipt(wiki, receipt_id, *, expected_url=None, expected_video_id=None, verify_files=True):
+    path = caption_receipt_path(wiki, receipt_id)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("caption receipt is missing")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError("caption receipt is malformed") from error
+    return validate_caption_receipt(
+        data,
+        wiki=wiki,
+        expected_url=expected_url,
+        expected_video_id=expected_video_id,
+        verify_files=verify_files,
+    )
 
 
 def atomic_json(path, payload):

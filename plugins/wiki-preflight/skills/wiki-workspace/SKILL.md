@@ -38,6 +38,13 @@ For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
 ingestion and the agent automatically drains any remaining queue entries during
 the same task. No user-side command or repeated prompt is required.
 
+The hook context is authoritative about caption eligibility only when it says
+`caption_evidence=verified` and provides `receipt_id`, `caption_sha256`, and
+receipt-bound files. Pass that receipt ID through the bundled canonicalization
+flow when creating evidence. Treat `stale-or-unreceipted`, `metadata-only`,
+`no-verified-caption`, and `machine-transcription` as ineligible for transcript
+facts, even when a file is present.
+
 When that ingestion reaches a terminal non-transcript result and the task needs
 video detail, the agent may run the bundled local-STT fallback outside hook
 time. It is permitted only for public audio and an already approved, installed

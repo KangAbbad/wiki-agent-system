@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import hashlib, json, sys, os, re, subprocess, tempfile, time, uuid
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 sys.dont_write_bytecode = True
 
@@ -15,6 +15,7 @@ from youtube_fallback import (
     queue_id_for,
     queue_snapshot,
     safe_text,
+    validate_caption_receipt,
 )
 
 SENSITIVE = re.compile(r"((?:api[_ -]?key|password|secret|token|private[_ -]?key|authorization)\s*[:=])[^\r\n]*", re.I)
@@ -168,6 +169,50 @@ def bounded_youtube_drain(cwd, queue_id, max_seconds, hook_deadline, limit):
     )
 
 
+def verified_caption_receipt(wiki, item):
+    receipt = item.get("receipt")
+    if (
+        item.get("status") != "ok"
+        or item.get("provenance_class") != "caption"
+        or item.get("evidence_eligible") is not True
+        or item.get("transcript_eligible") is not True
+        or not isinstance(receipt, dict)
+    ):
+        return None
+    try:
+        validate_caption_receipt(
+            receipt,
+            wiki=wiki,
+            expected_url=item.get("url"),
+            expected_video_id=item.get("video_id"),
+            verify_files=True,
+        )
+        receipt_files = [PurePosixPath(entry["path"]).name for entry in receipt["files"]]
+    except (OSError, TypeError, ValueError, KeyError):
+        return None
+    return receipt if item.get("files") == receipt_files else None
+
+
+def evidence_context(wiki, item):
+    receipt = verified_caption_receipt(wiki, item)
+    if receipt:
+        hashes = ",".join(entry["sha256"] for entry in receipt["files"])
+        files = "; ".join(PurePosixPath(entry["path"]).name for entry in receipt["files"])
+        return (
+            f"caption_evidence=verified; receipt_id={safe_text(receipt['receipt_id'], 80)}; "
+            f"caption_sha256={safe_text(hashes, 400)}; receipt_files={safe_text(files, 400)}",
+            "eligible",
+        )
+    if item.get("status") == "metadata-only":
+        return "caption_evidence=ineligible; reason=metadata-only; receipt=missing-or-invalid", "metadata-only"
+    helper_status = item.get("helper_status")
+    if helper_status == "stale-captions-ignored" or item.get("evidence_reason") == "stale-caption-ignored":
+        return "caption_evidence=ineligible; reason=stale-or-unreceipted; receipt=missing-or-invalid", "stale-or-unreceipted"
+    if item.get("status") == "ok" or item.get("files"):
+        return "caption_evidence=ineligible; reason=unreceipted-or-invalid; receipt=missing-or-invalid", "unreceipted-or-invalid"
+    return "caption_evidence=ineligible; reason=no-verified-caption; receipt=missing-or-invalid", "none"
+
+
 def youtube_preflight_context(root, cwd, prompt, payload):
     urls = youtube_prompt_urls(prompt)
     if not urls:
@@ -183,7 +228,7 @@ def youtube_preflight_context(root, cwd, prompt, payload):
         snapshot = queue_snapshot(root, queue_id)
     except (OSError, QueueError) as error:
         lines.append(f"- queue: status=unavailable; reason={safe_text(str(error), 160)}")
-        lines.append("Only listed new caption files are evidence; no-captions and stale-captions-ignored are not fresh transcripts.")
+        lines.append("Transcript evidence requires a verified receipt; stale/unreceipted captions, metadata-only, and machine-transcription are ineligible for transcript facts.")
         return "\n".join(lines)
 
     if snapshot.get("status") != "ok":
@@ -192,25 +237,28 @@ def youtube_preflight_context(root, cwd, prompt, payload):
         for item in snapshot["records"]:
             files = item.get("files") if isinstance(item.get("files"), list) else []
             provenance = safe_text(str(item.get("provenance_class") or "none"), 40)
-            evidence = "eligible" if item.get("evidence_eligible") is True else "ineligible"
-            transcript = "eligible" if item.get("transcript_eligible") is True else "not-available"
+            evidence_detail, evidence = evidence_context(root, item)
+            transcript = "eligible" if evidence == "eligible" else "not-available"
             lines.append(
                 f"- {item['url']}: status={item['status']}; provenance={provenance}; "
                 f"evidence={evidence}; transcript={transcript}; files={len(files)}"
             )
-            if files:
+            lines.append(f"  {evidence_detail}")
+            if files and evidence == "eligible":
                 lines.append(f"  caption_files={'; '.join(files[:8])}")
+            elif files:
+                lines.append(f"  stale_caption_files={'; '.join(safe_text(str(file), 120) for file in files[:8])}")
             if item["status"] == "blocked-install":
                 lines.append("  installation=blocked; explicit approval is required before a new retry attempt")
             if transcript == "not-available":
-                lines.append("  transcript=not-available; metadata-only and missing captions cannot support transcript claims")
+                lines.append("  transcript=not-available; stale/unreceipted captions, metadata-only, and machine-transcription cannot support transcript claims")
         if len(urls) > YOUTUBE_PREFLIGHT_MAX_URLS:
             lines.append(
                 f"- queued={len(urls) - YOUTUBE_PREFLIGHT_MAX_URLS} additional YouTube URL(s); "
                 f"automatic drain processed={automatic.get('processed', 0)}; "
                 f"terminal={snapshot['terminal']}; pending={snapshot['pending']}."
             )
-    lines.append("Only listed new caption files are evidence; no-captions and stale-captions-ignored are not fresh transcripts.")
+    lines.append("Transcript evidence requires caption_evidence=verified with receipt_id and caption_sha256; stale/unreceipted captions, metadata-only, and machine-transcription are ineligible for transcript facts.")
     return "\n".join(lines)
 
 

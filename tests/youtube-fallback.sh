@@ -94,6 +94,10 @@ if os.environ.get("FAKE_YTDLP_NO_CAPTIONS") == "1":
 video = video_id(sys.argv[-1])
 template = Path(sys.argv[sys.argv.index("--output") + 1])
 target = Path(str(template).replace("%(id)s", video).replace("%(ext)s", "vtt"))
+if os.environ.get("FAKE_YTDLP_SUCCESS_SYMLINK") == "1":
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    target.symlink_to(os.environ["FAKE_SENTINEL"])
+    raise SystemExit(0)
 if not target.exists():
     target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     target.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nfixture caption\n")
@@ -131,6 +135,158 @@ url='https://youtu.be/dQw4w9WgXcQ?si=ignored'
 first=$(cd "$workspace" && "$launcher" "$script" captions "$url" --attempts 1 --backoff 0 --timeout 5 --output-dir "$output_dir")
 printf '%s' "$first" | grep -q '"status": "ok"'
 test -f "$output_dir/dQw4w9WgXcQ.vtt"
+first_receipt=$(find "$workspace/.wiki/.sessions/wiki-agent-system/youtube-receipts" -type f -name '*.json' -print)
+test -n "$first_receipt"
+first_receipt_id=$(printf '%s' "$first" | python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt"]["receipt_id"])')
+python3 - "$first_receipt" "$output_dir/dQw4w9WgXcQ.vtt" "$workspace" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+receipt_path, caption_path, workspace = map(Path, sys.argv[1:])
+data = json.loads(receipt_path.read_text())
+assert set(data) == {
+    "schema_version", "receipt_id", "canonical_url", "video_id", "status",
+    "provenance_class", "attempt", "attempted_at", "files",
+}
+assert data["schema_version"] == 1
+assert data["status"] == "ok"
+assert data["provenance_class"] == "caption"
+assert data["canonical_url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+assert data["files"] == [{
+    "path": "inbox/youtube/dQw4w9WgXcQ.vtt",
+    "sha256": hashlib.sha256(caption_path.read_bytes()).hexdigest(),
+}]
+assert str(workspace) not in json.dumps(data)
+PY
+! printf '%s' "$first" | grep -Fq "$workspace"
+printf '%s' "$first" | grep -q '"sha256":'
+
+ambient_script="$root/plugins/wiki-preflight/scripts/wiki_ambient.py"
+receipt_backup="$test_root/first-receipt.json"
+cp "$first_receipt" "$receipt_backup"
+canonical_result=$(cd "$workspace" && HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$ambient_script" canonicalize \
+  --cwd "$workspace" --source "$output_dir/dQw4w9WgXcQ.vtt" --source-url "$url" \
+  --title 'Caption fixture' --receipt "$first_receipt_id")
+printf '%s' "$canonical_result" | grep -q 'canonical-evidence'
+printf '%s' "$canonical_result" | grep -q "\"receipt_id\": \"$first_receipt_id\""
+caption_raw=$(find "$workspace/.wiki/raw" -type f -name 'caption-fixture-*.md')
+grep -q "^receipt_id: $first_receipt_id$" "$caption_raw"
+grep -q '^provenance_class: caption$' "$caption_raw"
+caption_digest=$(shasum -a 256 "$output_dir/dQw4w9WgXcQ.vtt" | awk '{print $1}')
+caption_prefix=$(printf '%s' "$caption_digest" | cut -c1-12)
+unbound_raw="$workspace/.wiki/raw/unbound-existing-$caption_prefix.md"
+printf '%s\n' '---' 'type: raw-source' "content_sha256: $caption_digest" '---' >"$unbound_raw"
+set +e
+unbound_result=$(cd "$workspace" && HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$ambient_script" canonicalize \
+  --cwd "$workspace" --source "$output_dir/dQw4w9WgXcQ.vtt" --source-url "$url" \
+  --title 'Unbound existing' --receipt "$first_receipt_id" 2>&1)
+unbound_status=$?
+set -e
+test "$unbound_status" -ne 0
+printf '%s' "$unbound_result" | grep -q 'not receipt-bound'
+
+set +e
+missing_receipt_result=$(cd "$workspace" && HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$ambient_script" canonicalize \
+  --cwd "$workspace" --source "$output_dir/dQw4w9WgXcQ.vtt" --source-url "$url" \
+  --title 'Missing receipt' 2>&1)
+missing_receipt_status=$?
+set -e
+test "$missing_receipt_status" -ne 0
+printf '%s' "$missing_receipt_result" | grep -q 'requires --receipt'
+
+cp "$output_dir/dQw4w9WgXcQ.vtt" "$test_root/caption-before-tamper.vtt"
+printf '%s\n' tampered >>"$output_dir/dQw4w9WgXcQ.vtt"
+set +e
+tampered_result=$(cd "$workspace" && HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$ambient_script" canonicalize \
+  --cwd "$workspace" --source "$output_dir/dQw4w9WgXcQ.vtt" --source-url "$url" \
+  --title 'Tampered receipt' --receipt "$first_receipt_id" 2>&1)
+tampered_status=$?
+set -e
+test "$tampered_status" -ne 0
+printf '%s' "$tampered_result" | grep -q 'hash mismatch'
+mv "$test_root/caption-before-tamper.vtt" "$output_dir/dQw4w9WgXcQ.vtt"
+printf '%s\n' '{"schema_version":99}' >"$first_receipt"
+set +e
+malformed_result=$(cd "$workspace" && HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$ambient_script" canonicalize \
+  --cwd "$workspace" --source "$output_dir/dQw4w9WgXcQ.vtt" --source-url "$url" \
+  --title 'Malformed receipt' --receipt "$first_receipt_id" 2>&1)
+malformed_status=$?
+set -e
+test "$malformed_status" -ne 0
+printf '%s' "$malformed_result" | grep -q 'caption receipt rejected'
+cp "$receipt_backup" "$first_receipt"
+rm "$first_receipt"
+set +e
+absent_receipt_result=$(cd "$workspace" && HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$ambient_script" canonicalize \
+  --cwd "$workspace" --source "$output_dir/dQw4w9WgXcQ.vtt" --source-url "$url" \
+  --title 'Absent receipt' --receipt "$first_receipt_id" 2>&1)
+absent_receipt_status=$?
+set -e
+test "$absent_receipt_status" -ne 0
+printf '%s' "$absent_receipt_result" | grep -q 'caption receipt rejected'
+cp "$receipt_backup" "$first_receipt"
+
+symlink_success_workspace="$test_root/symlink-success-workspace"
+mkdir -p "$symlink_success_workspace/.wiki/raw" "$symlink_success_workspace/.wiki/wiki" "$symlink_success_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$symlink_success_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$symlink_success_workspace/.wiki/_index.md"
+symlink_success_output="$symlink_success_workspace/.wiki/inbox/youtube"
+symlink_success_sentinel="$test_root/success-sentinel.txt"
+printf '%s\n' sentinel >"$symlink_success_sentinel"
+set +e
+symlink_success_result=$(cd "$symlink_success_workspace" && FAKE_YTDLP_SUCCESS_SYMLINK=1 FAKE_SENTINEL="$symlink_success_sentinel" "$launcher" "$script" captions "$url" --attempts 1 --backoff 0 --timeout 5 --output-dir "$symlink_success_output" 2>&1)
+symlink_success_status=$?
+set -e
+test "$symlink_success_status" -eq 1
+printf '%s' "$symlink_success_result" | grep -q 'caption-symlink'
+test ! -L "$symlink_success_output/dQw4w9WgXcQ.vtt"
+test -f "$symlink_success_sentinel"
+grep -q '^sentinel$' "$symlink_success_sentinel"
+
+concurrent_workspace="$test_root/concurrent-workspace"
+mkdir -p "$concurrent_workspace/.wiki/raw" "$concurrent_workspace/.wiki/wiki" "$concurrent_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$concurrent_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$concurrent_workspace/.wiki/_index.md"
+concurrent_output="$concurrent_workspace/.wiki/inbox/youtube"
+concurrent_one="$test_root/concurrent-one.json"
+concurrent_two="$test_root/concurrent-two.json"
+(cd "$concurrent_workspace" && FAKE_YTDLP_DELAY=0.3 "$launcher" "$script" captions "$url" --attempts 1 --backoff 0 --timeout 5 --output-dir "$concurrent_output" >"$concurrent_one") &
+concurrent_pid_one=$!
+(cd "$concurrent_workspace" && FAKE_YTDLP_DELAY=0.3 "$launcher" "$script" captions "$url" --attempts 1 --backoff 0 --timeout 5 --output-dir "$concurrent_output" >"$concurrent_two") &
+concurrent_pid_two=$!
+wait "$concurrent_pid_one"
+wait "$concurrent_pid_two"
+python3 - "$concurrent_one" "$concurrent_two" <<'PY'
+import json
+import sys
+
+statuses = [json.load(open(path))['status'] for path in sys.argv[1:]]
+assert sorted(statuses) == ['ok', 'stale-captions-ignored'], statuses
+PY
+test "$(find "$concurrent_workspace/.wiki/.sessions/wiki-agent-system/youtube-receipts" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 1
+
+tampered_queue_workspace="$test_root/tampered-queue-workspace"
+mkdir -p "$tampered_queue_workspace/.wiki/raw" "$tampered_queue_workspace/.wiki/wiki" "$tampered_queue_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$tampered_queue_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$tampered_queue_workspace/.wiki/_index.md"
+tampered_queue=$("$launcher" "$script" queue --workspace "$tampered_queue_workspace" --session-id tampered --turn-id one "$url")
+tampered_queue_id=$(printf '%s' "$tampered_queue" | python3 -c 'import json,sys; print(json.load(sys.stdin)["queue_id"])')
+"$launcher" "$script" drain --workspace "$tampered_queue_workspace" --queue-id "$tampered_queue_id" --deadline 10 --limit 1 >/dev/null
+printf '%s\n' tampered >>"$tampered_queue_workspace/.wiki/inbox/youtube/dQw4w9WgXcQ.vtt"
+tampered_snapshot=$("$launcher" "$script" queue --workspace "$tampered_queue_workspace" --session-id tampered --turn-id one "$url")
+python3 - "$tampered_snapshot" <<'PY'
+import json
+import sys
+
+item = json.loads(sys.argv[1])["records"][0]
+assert item["status"] == "ok"
+assert item["files"] == []
+assert item["receipt"] is None
+assert item["evidence_eligible"] is False
+assert item["transcript_eligible"] is False
+PY
 
 model="$test_root/ggml-base.bin"
 printf '%s\n' fixture-model >"$model"
@@ -286,7 +442,10 @@ metadata_queue_output=$(printf '%s' "{\"cwd\":\"$metadata_queue_workspace\",\"ho
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_METADATA=1 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$hook")
 printf '%s' "$metadata_queue_output" | grep -q 'status=metadata-only'
 printf '%s' "$metadata_queue_output" | grep -q 'provenance=metadata'
+printf '%s' "$metadata_queue_output" | grep -q 'evidence=metadata-only'
+printf '%s' "$metadata_queue_output" | grep -q 'caption_evidence=ineligible; reason=metadata-only; receipt=missing-or-invalid'
 printf '%s' "$metadata_queue_output" | grep -q 'transcript=not-available'
+printf '%s' "$metadata_queue_output" | grep -q 'machine-transcription cannot support transcript claims'
 metadata_queue_record=$(find "$metadata_queue_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$metadata_queue_record" <<'PY'
 import json
@@ -306,6 +465,19 @@ assert "tracking-query" not in json.dumps(item)
 assert all(attempt["route"] in {"caption", "metadata"} for attempt in item["attempts"])
 PY
 
+stale_context_workspace="$test_root/stale-context-workspace"
+mkdir -p "$stale_context_workspace/.wiki/raw" "$stale_context_workspace/.wiki/wiki" "$stale_context_workspace/.wiki/inbox/youtube"
+printf '%s\n' '# Workspace Wiki' >"$stale_context_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$stale_context_workspace/.wiki/_index.md"
+printf '%s\n' 'WEBVTT' '' '00:00.000 --> 00:01.000' 'stale fixture caption' >"$stale_context_workspace/.wiki/inbox/youtube/dQw4w9WgXcQ.vtt"
+stale_context_prompt='Riset video https://youtu.be/dQw4w9WgXcQ'
+stale_context_output=$(printf '%s' "{\"cwd\":\"$stale_context_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"stale-context\",\"turn_id\":\"one\",\"prompt\":\"$stale_context_prompt\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+printf '%s' "$stale_context_output" | grep -q 'status=no-captions'
+printf '%s' "$stale_context_output" | grep -q 'caption_evidence=ineligible; reason=stale-or-unreceipted; receipt=missing-or-invalid'
+printf '%s' "$stale_context_output" | grep -q 'transcript=not-available'
+printf '%s' "$stale_context_output" | grep -q 'stale/unreceipted captions'
+
 hook_workspace="$test_root/hook-workspace"
 hook_log="$test_root/hook-fetches.log"
 mkdir -p "$hook_workspace/.wiki/raw" "$hook_workspace/.wiki/wiki" "$hook_workspace/.wiki/inbox"
@@ -316,6 +488,9 @@ hook_output=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"Us
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$hook_log" "$launcher" "$hook")
 printf '%s' "$hook_output" | grep -q 'YouTube automatic fallback preflight'
 printf '%s' "$hook_output" | grep -q 'status=ok'
+printf '%s' "$hook_output" | grep -q 'caption_evidence=verified'
+printf '%s' "$hook_output" | grep -q 'receipt_id='
+printf '%s' "$hook_output" | grep -q 'caption_sha256='
 printf '%s' "$hook_output" | grep -q 'queued=2 additional YouTube URL(s)'
 ! printf '%s' "$hook_output" | grep -Fq 'skipped='
 ! printf '%s' "$hook_output" | grep -Fq 'process on demand'
@@ -340,6 +515,8 @@ assert all(item["evidence_eligible"] is True for item in data["items"])
 assert all(item["transcript_eligible"] is True for item in data["items"])
 assert all(item["evidence_reason"] == "fresh-regular-vtt" for item in data["items"])
 assert all(item["attempts"] and item["attempts"][0]["route"] == "caption" for item in data["items"])
+assert all(item["receipt"]["provenance_class"] == "caption" for item in data["items"])
+assert all(len(item["receipt"]["files"]) == 1 for item in data["items"])
 assert all("session" not in json.dumps(item).lower() for item in data["items"])
 assert not any(key in json.dumps(data) for key in ("PLUGIN_ROOT", "PLUGIN_DATA"))
 PY
@@ -482,6 +659,7 @@ second_drain=$!
 wait "$first_drain"
 wait "$second_drain"
 test "$(wc -l <"$race_log" | tr -d ' ')" -eq 2
+test "$(find "$race_workspace/.wiki/.sessions/wiki-agent-system/youtube-receipts" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 2
 
 future_workspace="$test_root/future-workspace"
 mkdir -p "$future_workspace/.wiki/raw" "$future_workspace/.wiki/wiki" "$future_workspace/.wiki/inbox"

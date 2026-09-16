@@ -50,14 +50,20 @@ It uses one short attempt per URL, does not install anything, and writes only
 fresh manual or automatic VTT captions to the current valid Wiki's
 `inbox/youtube/` directory. The hook injects the helper's JSON status and new
 file paths into the agent context, so a missing transcript is not treated as
-the end of extraction.
+the end of extraction. A caption is transcript evidence in that context only
+when it is shown as `caption_evidence=verified` with its `receipt_id`,
+`caption_sha256`, and receipt-bound file list. A path without that verified
+receipt is reported as stale/unreceipted and must not be used for transcript
+claims.
 
 Every helper and queue result carries the canonical URL, a `provenance_class`
 (`caption`, `metadata`, or `none`), `evidence_eligible`, and
-`transcript_eligible`. Only a fresh regular VTT has caption and transcript
-eligibility. `metadata-only` may support metadata claims only;
-`no-captions`, stale captions, failures, and blocked installation are not
-transcript evidence and must not be used to synthesize transcript facts.
+`transcript_eligible`. Only a fresh regular VTT bound to a valid receipt has
+caption and transcript eligibility. `metadata-only` may support metadata
+claims only; `no-captions`, stale/unreceipted captions, failures, and blocked
+installation are not transcript evidence and must not be used to synthesize
+transcript facts. Local STT is always labeled `machine-transcription` with
+both eligibility flags false.
 
 When more valid URLs are present than the bounded immediate batch, the
 remaining URLs enter the agent-owned automatic queue drain during the same
@@ -119,5 +125,7 @@ directory or a child directory. Arbitrary paths and other Wiki roots return
 
 Do not pass browser cookies, credentials, or arbitrary non-YouTube URLs to the
 helper. Do not use it to bypass login, paywall, anti-bot, region, quota, or other
-access controls. Record the helper's JSON status and caption file paths in the
-Wiki evidence provenance.
+access controls. Record the helper's JSON status, receipt ID, source hash, and
+receipt-bound caption file paths in the Wiki evidence provenance.
+Canonicalization of a caption requires that receipt ID; metadata-only,
+stale/unreceipted captions, and machine transcription cannot satisfy that gate.

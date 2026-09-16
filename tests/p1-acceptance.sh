@@ -54,6 +54,14 @@ semantic_and_evidence() (
   grep -q '^valid_until: null$' "$raw"
   grep -q '^canonical_uri: "wiki://workspace/' "$raw"
 
+  caption="$workspace/.wiki/inbox/youtube/p1.vtt"
+  mkdir -p "$(dirname "$caption")"
+  printf '%s\n' 'WEBVTT' '' '00:00.000 --> 00:01.000' 'P1 caption' >"$caption"
+  ! HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" \
+    "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/wiki_ambient.py" canonicalize \
+    --cwd "$workspace" --source "$caption" \
+    --source-url 'https://youtu.be/dQw4w9WgXcQ?si=p1' --title 'P1 Missing Receipt' >/dev/null 2>&1
+
   unsafe="$test_root/unsafe.md"
   printf '%s\n' 'api_key=not-for-wiki' >"$unsafe"
   ! "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/wiki_ambient.py" canonicalize \
