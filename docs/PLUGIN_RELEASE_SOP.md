@@ -1,0 +1,105 @@
+# Wiki Preflight Release SOP
+
+Use this procedure for every shipped improvement or bug fix. A source-tree
+change is not a release.
+
+## 1. Classify and version
+
+Update `plugins/wiki-preflight/.codex-plugin/plugin.json` before the release
+commit.
+
+| Change | Version increment |
+|---|---|
+| Compatible bug fix | patch (`0.7.0` → `0.7.1`) |
+| New behavior, schema migration, or user-visible capability | minor (`0.7.0` → `0.8.0`) |
+| Contract that cannot migrate safely | major |
+
+Internal schemas may migrate independently, but an unknown future schema must
+remain read-only. Do not reuse a previously published plugin version.
+
+## 2. Release gate
+
+From a clean source checkout, run the full gate:
+
+```sh
+sh tests/p1-acceptance.sh
+```
+
+It must end with `P1 ACCEPTANCE: PASS`. This includes source, installed
+runtime, stable-runtime, coexistence, and fresh Git marketplace validation.
+Also require Python compilation, shell/JSON validation, `git diff --check`, and
+credential scan to pass. Any skipped, warning, or failed required gate blocks
+release.
+
+## 3. Publish candidate
+
+Review the staged diff for secrets and environment-specific identifiers. Commit
+the version bump and verified change, then push the exact commit to `main`.
+Record the commit SHA and version in the release report.
+
+## 4. Refresh installation and restart Codex
+
+After the push, refresh the marketplace snapshot and install the released
+package:
+
+```sh
+codex plugin marketplace upgrade wiki-agent-system
+codex plugin add wiki-preflight@wiki-agent-system
+```
+
+Then fully quit Codex and reopen it before validation. Reopening is mandatory
+after any plugin package, hook manifest, skill, or policy change: it reloads
+the plugin catalog, hook registrations, and skills for new tasks. Do not rely
+on an already-open task to validate a release.
+
+## 5. Mandatory cache cleanup
+
+Only clean caches after steps 2–4 succeed and no active task is using the old
+runtime.
+
+1. Verify the new installed cache version and the stable runtime target match.
+2. Retain the current stable runtime and one immediately previous runtime for
+   rollback.
+3. Remove only superseded **versioned marketplace cache directories** beneath:
+
+   ```text
+   ~/.codex/plugins/cache/wiki-agent-system/wiki-preflight/<old-version>
+   ```
+
+   Never remove the newly installed version.
+4. Remove stale Python bytecode cache entries only from:
+
+   ```text
+   ${TMPDIR:-/tmp}/wiki-preflight-python-cache
+   ```
+
+Do **not** remove any of the following: `~/.config/llm-wiki/`,
+`.wiki/`, `.wiki/.sessions/`, receipts, queues, or
+`~/.codex/plugins/data/wiki-preflight-wiki-agent-system/current`. These are
+user/runtime state, not disposable package cache.
+
+If a cache is suspected corrupt rather than merely superseded, use a clean
+reinstall after quitting Codex: remove the plugin through Codex plugin
+management, then install `wiki-preflight@wiki-agent-system` again. Reopen
+Codex and complete the post-install validation below before resuming work.
+
+## 6. Post-install validation
+
+In a new Codex task, verify all of the following:
+
+- plugin information shows the released version;
+- one `SessionStart`, `UserPromptSubmit`, and `Stop` hook run successfully;
+- the stable runtime executes after a versioned cache removal test;
+- no duplicate `wiki-preflight` hook registration exists;
+- workspace/user configuration, Wiki captures, receipts, and queues remain
+  intact.
+
+For production release, also run fresh Git marketplace clean-device validation
+against the pushed commit. Mark the release complete only when it passes.
+
+## Rollback
+
+If post-install validation fails, restore the immediately previous retained
+plugin version, repoint the stable runtime atomically through normal plugin
+provisioning, reopen Codex, and rerun the post-install checks. Do not edit Wiki
+or user configuration files to roll back a package.

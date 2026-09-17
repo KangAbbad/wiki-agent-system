@@ -85,6 +85,10 @@ On task start, the hook provisions the installed runtime into stable plugin
 data. After a later update removes a versioned cache, existing tasks continue
 using that stable runtime; a new task provisions the newer runtime.
 
+Every release follows the [Plugin Release SOP](docs/PLUGIN_RELEASE_SOP.md):
+version increment, full acceptance gate, publish, marketplace refresh, full
+Codex restart, scoped cache cleanup, and post-install validation.
+
 ## Storage control
 
 `retention.py <workspace>` reports `.wiki/` usage against the user-configured
