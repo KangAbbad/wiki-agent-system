@@ -10,6 +10,7 @@ from evidence_verification import drain_due_queue as drain_public_verification_q
 from youtube_fallback import (
     QueueError,
     canonical_video,
+    drain_due_queues,
     drain_queue,
     ensure_queue,
     queue_id_for,
@@ -262,6 +263,14 @@ def run_scheduled_public_verification(root):
         return
 
 
+def run_scheduled_youtube_retries(root):
+    """Recover due caption retries without delaying the user prompt."""
+    try:
+        drain_due_queues(root.parent, deadline_seconds=8, limit=2)
+    except (OSError, QueueError, SystemExit, TypeError, ValueError):
+        return
+
+
 def prompt_text(payload):
     for key in ("prompt", "user_prompt", "user_message", "message"):
         value = payload.get(key)
@@ -293,7 +302,7 @@ def bounded_youtube_drain(cwd, queue_id, max_seconds, hook_deadline, limit):
         cwd,
         queue_id,
         min(max_seconds, remaining),
-        concurrency=2,
+        concurrency=1,
         limit=limit,
     )
 
@@ -332,8 +341,14 @@ def evidence_context(wiki, item):
             f"caption_sha256={safe_text(hashes, 400)}; receipt_files={safe_text(files, 400)}",
             "eligible",
         )
-    if item.get("status") == "metadata-only":
+    if item.get("status") == "metadata-only" or (item.get("status") == "no-captions" and item.get("metadata_state") == "acquired"):
         return "caption_evidence=ineligible; reason=metadata-only; receipt=missing-or-invalid", "metadata-only"
+    if item.get("status") == "retryable":
+        category = safe_text(str(item.get("error_class") or "caption-fetch-failed"), 80)
+        return f"caption_evidence=ineligible; reason=retry-scheduled; category={category}; user-retry=not-required", "retry-scheduled"
+    if item.get("status") == "exhausted":
+        category = safe_text(str(item.get("error_class") or "caption-fetch-failed"), 80)
+        return f"caption_evidence=ineligible; reason=retry-exhausted; category={category}; receipt=missing-or-invalid", "exhausted"
     helper_status = item.get("helper_status")
     if helper_status == "stale-captions-ignored" or item.get("evidence_reason") == "stale-caption-ignored":
         return "caption_evidence=ineligible; reason=stale-or-unreceipted; receipt=missing-or-invalid", "stale-or-unreceipted"
@@ -379,6 +394,10 @@ def youtube_preflight_context(root, cwd, prompt, payload):
                 lines.append(f"  stale_caption_files={'; '.join(safe_text(str(file), 120) for file in files[:8])}")
             if item["status"] == "blocked-install":
                 lines.append("  installation=blocked; no user action requested; report bounded verification status")
+            if evidence == "retry-scheduled":
+                lines.append("  retry=automatic on a later SessionStart; do not ask the user to repeat the prompt")
+            if evidence == "exhausted":
+                lines.append("  retry=automatic cap reached; transcript evidence remains unavailable")
             if transcript == "not-available":
                 lines.append("  transcript=not-available; stale/unreceipted captions, metadata-only, and machine-transcription cannot support transcript claims")
         if len(urls) > YOUTUBE_PREFLIGHT_MAX_URLS:
@@ -449,6 +468,7 @@ if root:
     if event == "SessionStart":
         run_scheduled_retention(root)
         run_scheduled_public_verification(root)
+        run_scheduled_youtube_retries(root)
     if event == "UserPromptSubmit":
         write_finalizer_state(root, payload, prompt)
     if event == "Stop":

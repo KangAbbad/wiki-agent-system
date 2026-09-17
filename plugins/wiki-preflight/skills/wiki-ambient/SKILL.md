@@ -60,6 +60,10 @@ receipt-bound file list. Stale or unreceipted captions, `metadata-only`, and
 receipt ID for the canonicalization gate rather than inferring freshness from a
 path or timestamp.
 
+When context reports `retry-scheduled`, recovery is automatic on a later
+`SessionStart`; do not ask the user to repeat the prompt. It remains ineligible
+for transcript claims until a verified receipt is available.
+
 Report each acquired source with its provenance class (`caption`,
 `web-extraction`, `metadata`, `machine-transcription`, or `none`), evidence
 lifecycle, and confidence. Public vendor, database, documentation, and

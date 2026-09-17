@@ -15,7 +15,6 @@ import tempfile
 import time
 import uuid
 from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from urllib.parse import parse_qs, urlparse
@@ -40,18 +39,24 @@ FORMATS = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 YTDLP_VERSION = "2026.08.19"
 TIMEOUT_MIN = 5
 TIMEOUT_MAX = 600
-QUEUE_SCHEMA_VERSION = 2
+QUEUE_SCHEMA_VERSION = 3
 QUEUE_LEGACY_SCHEMA_VERSION = 1
+QUEUE_PREVIOUS_SCHEMA_VERSION = 2
 QUEUE_DIRNAME = "youtube-queues"
 RECEIPT_SCHEMA_VERSION = 1
 RECEIPT_DIRNAME = "youtube-receipts"
 QUEUE_ID = re.compile(r"^[0-9a-f]{32}$")
 RECEIPT_ID = re.compile(r"^[0-9a-f]{32}$")
-QUEUE_STATES = frozenset({"pending", "running", "ok", "no-captions", "metadata-only", "error", "blocked-install"})
-QUEUE_TERMINAL_STATES = frozenset({"ok", "no-captions", "metadata-only", "error", "blocked-install"})
+QUEUE_STATES = frozenset({"pending", "running", "retryable", "ok", "no-captions", "exhausted", "error", "blocked-install"})
+QUEUE_TERMINAL_STATES = frozenset({"ok", "no-captions", "exhausted", "error", "blocked-install"})
+QUEUE_RETRYABLE_STATES = frozenset({"pending", "retryable"})
+QUEUE_AUTOMATIC_RETRY_CAP = 3
+QUEUE_RETRY_BASE_SECONDS = 5
+QUEUE_RETRY_MAX_SECONDS = 60
+RETRYABLE_CAPTION_ERRORS = frozenset({"network", "timeout", "process-failed", "deadline-exhausted", "caption-lock", "caption-fetch-failed", "invalid-helper-output"})
 QUEUE_LOCK_TIMEOUT = 0.5
 DRAIN_DEFAULT_DEADLINE = 20
-DRAIN_DEFAULT_CONCURRENCY = 2
+DRAIN_DEFAULT_CONCURRENCY = 1
 DRAIN_DEFAULT_LIMIT = 2
 DRAIN_PER_URL_TIMEOUT = 12
 RESULT_STATUSES = frozenset({"ok", "no-captions", "stale-captions-ignored", "metadata-only", "error", "blocked-install", "install-approval-required", "installer-failed"})
@@ -523,13 +528,26 @@ def queue_item_contract_defaults(item, wiki=None):
     files = item.get("files") if isinstance(item.get("files"), list) else []
     files_match_receipt = files == receipt_files
     caption_valid = receipt_valid and files_match_receipt
-    provenance_class = "caption" if caption_valid else "metadata" if status == "metadata-only" else "none"
-    evidence_eligible = caption_valid or status == "metadata-only"
+    metadata_state = item.get("metadata_state")
+    if metadata_state not in {"absent", "acquired"}:
+        metadata_state = "acquired" if isinstance(item.get("metadata"), dict) else "absent"
+    provenance_class = "caption" if caption_valid else "metadata" if metadata_state == "acquired" else "none"
+    evidence_eligible = caption_valid or metadata_state == "acquired"
     transcript_eligible = caption_valid
+    caption_state = item.get("caption_state")
+    if caption_state not in {"pending", "running", "retryable", "verified", "no-captions", "exhausted", "blocked"}:
+        caption_state = {
+            "ok": "verified",
+            "no-captions": "no-captions",
+            "exhausted": "exhausted",
+            "blocked-install": "blocked",
+        }.get(status, "pending")
     reason = {
         "ok": "fresh-regular-vtt" if caption_valid else "caption-receipt-invalid" if receipt is not None else "caption-receipt-missing",
         "no-captions": "no-fresh-caption",
         "metadata-only": "metadata-only-not-transcript",
+        "retryable": "caption-retry-scheduled",
+        "exhausted": "caption-retries-exhausted",
         "error": "caption-route-failed",
         "blocked-install": "installer-approval-required",
     }.get(status, "not-attempted")
@@ -541,6 +559,9 @@ def queue_item_contract_defaults(item, wiki=None):
         "attempts": item.get("attempts", []),
         "metadata": item.get("metadata"),
         "receipt": receipt if receipt_shape_valid else None,
+        "caption_state": caption_state,
+        "metadata_state": metadata_state,
+        "next_retry_at": item.get("next_retry_at"),
     }
     if status == "ok" and not caption_valid:
         defaults["files"] = []
@@ -615,8 +636,11 @@ def validate_queue(data, queue_id, schema_version=None):
         "error_class",
         "files",
         "receipt",
+        "caption_state",
+        "metadata_state",
+        "next_retry_at",
     }
-    if expected_version in {QUEUE_LEGACY_SCHEMA_VERSION, QUEUE_SCHEMA_VERSION}:
+    if expected_version in {QUEUE_LEGACY_SCHEMA_VERSION, QUEUE_PREVIOUS_SCHEMA_VERSION, QUEUE_SCHEMA_VERSION}:
         allowed |= contract_fields
     seen = set()
     for item in items:
@@ -629,7 +653,7 @@ def validate_queue(data, queue_id, schema_version=None):
         if canonical != item.get("url") or video_id != item.get("video_id") or canonical in seen:
             return "invalid", "queue item URL is not canonical or unique"
         seen.add(canonical)
-        if item.get("status") not in QUEUE_STATES:
+        if item.get("status") not in QUEUE_STATES and not (expected_version in {1, 2} and item.get("status") == "metadata-only"):
             return "invalid", "queue item status is invalid"
         if type(item.get("attempt")) is not int or not 0 <= item["attempt"] <= 1000:
             return "invalid", "queue item attempt is invalid"
@@ -642,6 +666,13 @@ def validate_queue(data, queue_id, schema_version=None):
         lease_until = item.get("lease_until")
         if lease_until is not None and (type(lease_until) not in (int, float) or not math.isfinite(lease_until) or lease_until < 0):
             return "invalid", "queue item lease is invalid"
+        next_retry_at = item.get("next_retry_at")
+        if next_retry_at is not None and (type(next_retry_at) not in (int, float) or not math.isfinite(next_retry_at) or next_retry_at < 0):
+            return "invalid", "queue item retry schedule is invalid"
+        if item.get("caption_state") is not None and item.get("caption_state") not in {"pending", "running", "retryable", "verified", "no-captions", "exhausted", "blocked"}:
+            return "invalid", "queue item caption state is invalid"
+        if item.get("metadata_state") is not None and item.get("metadata_state") not in {"absent", "acquired"}:
+            return "invalid", "queue item metadata state is invalid"
         for field in ("helper_status", "error_class"):
             value = item.get(field)
             if value is not None and (not isinstance(value, str) or len(value) > 120 or "\n" in value or "\r" in value):
@@ -669,17 +700,29 @@ def validate_queue(data, queue_id, schema_version=None):
         if present:
             legacy_unreceipted = item["status"] == "ok" and receipt is None
             caption_bound = item["status"] == "ok" and ((receipt is not None) or legacy_unreceipted) and bool(files)
-            expected_provenance = "caption" if caption_bound else "metadata" if item["status"] == "metadata-only" else "none"
+            expected_provenance = "caption" if caption_bound else "metadata" if (item.get("metadata_state") == "acquired" or (expected_version < QUEUE_SCHEMA_VERSION and item["status"] == "metadata-only")) else "none"
             if item["provenance_class"] != expected_provenance or item["provenance_class"] not in PROVENANCE_CLASSES:
                 return "invalid", "queue item provenance is invalid"
             if type(item["evidence_eligible"]) is not bool or type(item["transcript_eligible"]) is not bool:
                 return "invalid", "queue item evidence eligibility is invalid"
-            if item["evidence_eligible"] != (caption_bound or item["status"] == "metadata-only") or item["transcript_eligible"] != caption_bound:
+            if item["evidence_eligible"] != (caption_bound or item.get("metadata_state") == "acquired" or (expected_version < QUEUE_SCHEMA_VERSION and item["status"] == "metadata-only")) or item["transcript_eligible"] != caption_bound:
                 return "invalid", "queue item evidence eligibility is inconsistent"
             if not isinstance(item["evidence_reason"], str) or not 1 <= len(item["evidence_reason"]) <= 120 or "\n" in item["evidence_reason"] or "\r" in item["evidence_reason"]:
                 return "invalid", "queue item evidence reason is invalid"
             if not valid_attempts(item["attempts"]) or not valid_metadata(item["metadata"]):
                 return "invalid", "queue item evidence metadata is invalid"
+        if expected_version == QUEUE_SCHEMA_VERSION:
+            if {"caption_state", "metadata_state", "next_retry_at"} - set(item):
+                return "invalid", "queue item lifecycle contract is incomplete"
+            state_pairs = {
+                "retryable": "retryable",
+                "exhausted": "exhausted",
+                "ok": "verified",
+                "no-captions": "no-captions",
+            }
+            expected_caption_state = state_pairs.get(item["status"])
+            if expected_caption_state and item["caption_state"] != expected_caption_state:
+                return "invalid", "queue item lifecycle state is inconsistent"
     return "valid", None
 
 
@@ -693,32 +736,49 @@ def read_queue(path, queue_id):
         data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError):
         return "invalid", None, "queue record is unreadable"
-    if (
-        isinstance(data, dict)
-        and QUEUE_SCHEMA_VERSION > QUEUE_LEGACY_SCHEMA_VERSION
-        and data.get("schema_version") == QUEUE_LEGACY_SCHEMA_VERSION
-    ):
-        status, error = validate_queue(data, queue_id, QUEUE_LEGACY_SCHEMA_VERSION)
+    if isinstance(data, dict) and data.get("schema_version") in {QUEUE_LEGACY_SCHEMA_VERSION, QUEUE_PREVIOUS_SCHEMA_VERSION}:
+        status, error = validate_queue(data, queue_id, data.get("schema_version"))
         return ("legacy-schema", data, None) if status == "valid" else ("invalid", None, error)
     status, error = validate_queue(data, queue_id)
     return status, data if status == "valid" else None, error
 
 
-def migrate_queue_v1(data, queue_id):
-    status, error = validate_queue(data, queue_id, QUEUE_LEGACY_SCHEMA_VERSION)
+def migrate_queue(data, queue_id):
+    version = data.get("schema_version")
+    status, error = validate_queue(data, queue_id, version)
     if status != "valid":
         raise QueueError(error or "unsupported queue schema")
     migrated = dict(data)
     migrated["schema_version"] = QUEUE_SCHEMA_VERSION
     migrated["items"] = []
+    now = time.time()
     for item in data["items"]:
         migrated_item = dict(item)
+        caption_attempts = [attempt for attempt in item.get("attempts", []) if attempt.get("route") == "caption"]
+        last_caption_error = caption_attempts[-1].get("error_class") if caption_attempts else None
+        if item.get("status") == "metadata-only":
+            migrated_item["status"] = "no-captions" if last_caption_error == "caption-track-absent" else "retryable"
+            migrated_item["caption_state"] = "no-captions" if last_caption_error == "caption-track-absent" else "retryable"
+            migrated_item["next_retry_at"] = None if last_caption_error == "caption-track-absent" else now
+        elif item.get("status") == "ok":
+            migrated_item["caption_state"] = "verified"
+            migrated_item["next_retry_at"] = None
+        elif item.get("status") == "no-captions":
+            migrated_item["caption_state"] = "no-captions"
+            migrated_item["next_retry_at"] = None
+        else:
+            migrated_item["caption_state"] = "exhausted" if item.get("status") == "error" else "pending"
+            migrated_item["next_retry_at"] = None
+        migrated_item["metadata_state"] = "acquired" if isinstance(item.get("metadata"), dict) else "absent"
         queue_item_contract_defaults(migrated_item)
         migrated["items"].append(migrated_item)
     status, error = validate_queue(migrated, queue_id)
     if status != "valid":
         raise QueueError(error or "queue schema migration failed")
     return migrated
+
+
+migrate_queue_v1 = migrate_queue
 
 
 def new_queue_item(url, timestamp):
@@ -744,6 +804,9 @@ def new_queue_item(url, timestamp):
         "attempts": [],
         "metadata": None,
         "receipt": None,
+        "caption_state": "pending",
+        "metadata_state": "absent",
+        "next_retry_at": None,
     }
 
 
@@ -788,7 +851,7 @@ def ensure_queue(wiki, urls, queue_id):
         else:
             migrated = status == "legacy-schema"
             if migrated:
-                data = migrate_queue_v1(data, queue_id)
+                data = migrate_queue(data, queue_id)
             existing = {item["url"] for item in data["items"]}
             additions = [new_queue_item(url, now) for url in urls if url not in existing]
             changed = migrated
@@ -844,7 +907,7 @@ def claim_queue_items(wiki, queue_id, limit, lease_seconds):
         migrated = status == "legacy-schema"
         if migrated:
             try:
-                data = migrate_queue_v1(data, queue_id)
+                data = migrate_queue(data, queue_id)
             except QueueError as migration_error:
                 return {"status": "invalid", "queue_id": queue_id, "error": str(migration_error), "claims": []}
             status = "valid"
@@ -864,7 +927,11 @@ def claim_queue_items(wiki, queue_id, limit, lease_seconds):
                 changed = True
         claims = []
         for item in data["items"]:
-            if item["status"] != "pending" or len(claims) >= limit:
+            due = item.get("status") == "pending" or (
+                item.get("status") == "retryable"
+                and (item.get("next_retry_at") is None or item["next_retry_at"] <= now)
+            )
+            if not due or len(claims) >= limit:
                 continue
             item["status"] = "running"
             item["attempt"] += 1
@@ -972,7 +1039,8 @@ def run_queue_item(claim, workspace, wiki, deadline):
     ]
     process = run_command(command, timeout, env=os.environ.copy(), cwd=str(workspace))
     if not isinstance(process, subprocess.CompletedProcess):
-        return {"state": "error", "helper_status": "error", "error_class": "timeout" if isinstance(process, subprocess.TimeoutExpired) else "process-failed", "files": []}
+        error = "timeout" if isinstance(process, subprocess.TimeoutExpired) else "process-failed"
+        return {"state": "retryable", "helper_status": "error", "error_class": error, "files": [], "retryable": True, "caption_state": "retryable"}
     data = parse_helper_result(process.stdout)
     if not data or data.get("url") != claim["url"] or data.get("video_id") != claim["video_id"]:
         return {"state": "error", "helper_status": "error", "error_class": "invalid-helper-output", "files": []}
@@ -1004,6 +1072,12 @@ def run_queue_item(claim, workspace, wiki, deadline):
     if not error_class and isinstance(data.get("attempts"), list) and data["attempts"]:
         error_class = data["attempts"][-1].get("error_class")
     error_class = safe_text(str(error_class), 80) if error_class else None
+    caption_attempts = [attempt for attempt in data.get("attempts", []) if attempt.get("route") == "caption"]
+    caption_error = caption_attempts[-1].get("error_class") if caption_attempts else error_class
+    if helper_status == "metadata-only" and caption_error:
+        error_class = safe_text(str(caption_error), 80)
+    if helper_status == "metadata-only":
+        state = "no-captions" if caption_error == "caption-track-absent" else "retryable"
     contract_status = helper_status if helper_status in RESULT_STATUSES else "error"
     if contract_status == "ok" and (not receipt or not files):
         contract_status = "error"
@@ -1036,6 +1110,8 @@ def run_queue_item(claim, workspace, wiki, deadline):
         "attempts": contract["attempts"],
         "metadata": contract["metadata"],
         "receipt": contract["receipt"],
+        "retryable": state == "retryable" or (state == "error" and error_class in RETRYABLE_CAPTION_ERRORS),
+        "caption_state": "verified" if state == "ok" else "no-captions" if state == "no-captions" else "retryable" if state == "retryable" else "exhausted",
     }
 
 
@@ -1055,9 +1131,23 @@ def finish_queue_claim(wiki, queue_id, claim, outcome):
         if outcome.get("defer"):
             item["status"] = "pending"
             item["error_class"] = safe_text(str(outcome.get("error_class") or "deferred"), 80)
+            item["next_retry_at"] = None
         else:
-            item["status"] = outcome["state"] if outcome["state"] in QUEUE_TERMINAL_STATES else "error"
-            item["terminal_at"] = stamp
+            state = outcome["state"] if outcome["state"] in {"ok", "no-captions", "retryable", "exhausted", "error", "blocked-install"} else "error"
+            if outcome.get("retryable"):
+                if item["retry_count"] < QUEUE_AUTOMATIC_RETRY_CAP:
+                    item["retry_count"] += 1
+                    item["status"] = "retryable"
+                    item["next_retry_at"] = time.time() + min(QUEUE_RETRY_BASE_SECONDS * (2 ** (item["retry_count"] - 1)), QUEUE_RETRY_MAX_SECONDS)
+                    item["terminal_at"] = None
+                else:
+                    item["status"] = "exhausted"
+                    item["next_retry_at"] = None
+                    item["terminal_at"] = stamp
+            else:
+                item["status"] = state if state in QUEUE_TERMINAL_STATES else "error"
+                item["next_retry_at"] = None
+                item["terminal_at"] = stamp
             item["helper_status"] = outcome.get("helper_status")
             item["error_class"] = outcome.get("error_class")
             item["files"] = outcome.get("files", [])
@@ -1066,8 +1156,17 @@ def finish_queue_claim(wiki, queue_id, claim, outcome):
             item["transcript_eligible"] = outcome.get("transcript_eligible", False)
             item["evidence_reason"] = outcome.get("evidence_reason", "not-available")
             item["attempts"] = outcome.get("attempts", [])
-            item["metadata"] = outcome.get("metadata")
+            new_metadata = outcome.get("metadata")
+            if new_metadata is not None and valid_metadata(new_metadata):
+                item["metadata"] = new_metadata
+                item["metadata_state"] = "acquired"
+            elif item.get("metadata_state") == "acquired" and valid_metadata(item.get("metadata")):
+                pass
+            else:
+                item["metadata"] = None
+                item["metadata_state"] = "absent"
             item["receipt"] = outcome.get("receipt")
+            item["caption_state"] = "verified" if item["status"] == "ok" else "no-captions" if item["status"] == "no-captions" else "exhausted" if item["status"] == "exhausted" else "retryable" if item["status"] == "retryable" else outcome.get("caption_state", "blocked")
             item["lease_until"] = None
         item["updated_at"] = stamp
         if outcome.get("defer"):
@@ -1094,28 +1193,46 @@ def drain_queue(workspace, queue_id, deadline_seconds=DRAIN_DEFAULT_DEADLINE, co
         remaining = deadline - time.monotonic()
         if remaining < TIMEOUT_MIN:
             break
-        batch_limit = concurrency if limit is None else min(concurrency, limit - processed)
+        batch_limit = 1 if limit is None else min(1, limit - processed)
         claimed = claim_queue_items(wiki, queue_id, batch_limit, max(DRAIN_PER_URL_TIMEOUT + 5, deadline_seconds + 1))
         if claimed["status"] != "ok" or not claimed["claims"]:
             break
         deferred = False
-        with ThreadPoolExecutor(max_workers=len(claimed["claims"])) as pool:
-            futures = {pool.submit(run_queue_item, claim, workspace, wiki, deadline): claim for claim in claimed["claims"]}
-            for future in as_completed(futures):
-                claim = futures[future]
-                try:
-                    outcome = future.result()
-                except Exception:
-                    outcome = {"state": "error", "helper_status": "error", "error_class": "worker-failed", "files": []}
-                finish_queue_claim(wiki, queue_id, claim, outcome)
-                deferred = deferred or bool(outcome.get("defer"))
-                processed += 1
+        for claim in claimed["claims"]:
+            try:
+                outcome = run_queue_item(claim, workspace, wiki, deadline)
+            except Exception:
+                outcome = {"state": "retryable", "helper_status": "error", "error_class": "worker-failed", "files": [], "retryable": True, "caption_state": "retryable"}
+            finish_queue_claim(wiki, queue_id, claim, outcome)
+            deferred = deferred or bool(outcome.get("defer"))
+            processed += 1
         if deferred:
             break
     result = queue_snapshot(wiki, queue_id)
     result["processed"] = processed
     result["deadline_seconds"] = deadline_seconds
     return result
+
+
+def drain_due_queues(workspace, deadline_seconds=8, limit=2):
+    """Bounded SessionStart recovery for all due local YouTube queues."""
+    wiki = queue_wiki(workspace)
+    directory = wiki / ".sessions" / "wiki-agent-system" / QUEUE_DIRNAME
+    try:
+        paths = sorted(directory.glob("*.json"))
+    except OSError:
+        return {"status": "unavailable", "processed": 0}
+    started = time.monotonic()
+    processed = 0
+    for path in paths:
+        if processed >= limit or time.monotonic() - started >= deadline_seconds:
+            break
+        queue_id = path.stem
+        if not QUEUE_ID.fullmatch(queue_id):
+            continue
+        result = drain_queue(workspace, queue_id, max(1, deadline_seconds - (time.monotonic() - started)), concurrency=1, limit=1)
+        processed += result.get("processed", 0)
+    return {"status": "ok", "processed": processed}
 
 
 def retry_queue_item(workspace, queue_id, url):
@@ -1132,7 +1249,7 @@ def retry_queue_item(workspace, queue_id, url):
     try:
         status, data, error = read_queue(path, queue_id)
         if status == "legacy-schema":
-            data = migrate_queue_v1(data, queue_id)
+            data = migrate_queue(data, queue_id)
             status = "valid"
         if status != "valid":
             raise QueueError(error or "queue record unavailable")
@@ -1152,6 +1269,9 @@ def retry_queue_item(workspace, queue_id, url):
         item["lease_until"] = None
         item["helper_status"] = None
         item["error_class"] = "explicit-retry"
+        item["caption_state"] = "pending"
+        item["metadata_state"] = "absent"
+        item["next_retry_at"] = None
         item["files"] = []
         item["provenance_class"] = "none"
         item["evidence_eligible"] = False
@@ -1530,6 +1650,10 @@ def fetch_captions(args):
             time.sleep(delay)
 
     metadata, metadata_attempt = fetch_metadata(command, url, deadline - time.monotonic())
+    if caption_status:
+        caption_attempts = [attempt for attempt in attempts if attempt.get("route") == "caption"]
+        if caption_attempts and not caption_attempts[-1].get("error_class"):
+            caption_attempts[-1]["error_class"] = "caption-track-absent"
     attempts.append(metadata_attempt)
     if metadata:
         emit(result_contract(

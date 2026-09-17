@@ -44,6 +44,10 @@ flow when creating evidence. Treat `stale-or-unreceipted`, `metadata-only`,
 `no-verified-caption`, and `machine-transcription` as ineligible for transcript
 facts, even when a file is present.
 
+Caption transport failures are reported as `retry-scheduled` while durable
+queue recovery is pending; do not ask the user to repeat the prompt. Only
+`caption_evidence=verified` is transcript evidence.
+
 When that ingestion reaches a terminal non-transcript result and the task needs
 video detail, the agent may run the bundled local-STT fallback outside hook
 time. It is permitted only for public audio and an already approved, installed

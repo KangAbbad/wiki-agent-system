@@ -51,7 +51,9 @@ delay_name = "FAKE_YTDLP_METADATA_DELAY" if "--dump-single-json" in sys.argv els
 delay = os.environ.get(delay_name) or os.environ.get("FAKE_YTDLP_DELAY")
 if delay:
     time.sleep(float(delay))
-if os.environ.get("FAKE_YTDLP_FAIL") == "1":
+if os.environ.get("FAKE_YTDLP_FAIL") == "1" or (
+    os.environ.get("FAKE_YTDLP_FAIL_CAPTION") == "1" and "--dump-single-json" not in sys.argv
+):
     if "--dump-single-json" in sys.argv:
         print("simulated metadata failure", file=sys.stderr)
         raise SystemExit(1)
@@ -296,7 +298,7 @@ stt_video='tGJTzahuapo'
 stt_queue=$($launcher "$script" queue --workspace "$workspace" --session-id stt --turn-id one "$stt_url")
 stt_queue_id=$(printf '%s' "$stt_queue" | python3 -c 'import json,sys; print(json.load(sys.stdin)["queue_id"])')
 stt_drain=$(FAKE_YTDLP_METADATA=1 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$script" drain --workspace "$workspace" --queue-id "$stt_queue_id" --deadline 10 --limit 1)
-printf '%s' "$stt_drain" | grep -q '"metadata-only": 1'
+printf '%s' "$stt_drain" | grep -q '"no-captions": 1'
 transcription=$(cd "$workspace" && "$launcher" "$script" transcribe "$stt_url" --workspace "$workspace" --queue-id "$stt_queue_id" --timeout 5 --model "$model" --output-dir "$transcription_dir")
 printf '%s' "$transcription" | grep -q '"status": "machine-transcription"'
 printf '%s' "$transcription" | grep -q '"provenance_class": "machine-transcription"'
@@ -440,7 +442,7 @@ printf '%s\n' '# Workspace Wiki' >"$metadata_queue_workspace/.wiki/_index.md"
 metadata_queue_prompt='Riset video https://www.youtube.com/watch?v=tGJTzahuapo&si=tracking-query'
 metadata_queue_output=$(printf '%s' "{\"cwd\":\"$metadata_queue_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"metadata\",\"turn_id\":\"one\",\"prompt\":\"$metadata_queue_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_METADATA=1 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$hook")
-printf '%s' "$metadata_queue_output" | grep -q 'status=metadata-only'
+printf '%s' "$metadata_queue_output" | grep -q 'status=no-captions'
 printf '%s' "$metadata_queue_output" | grep -q 'provenance=metadata'
 printf '%s' "$metadata_queue_output" | grep -q 'evidence=metadata-only'
 printf '%s' "$metadata_queue_output" | grep -q 'caption_evidence=ineligible; reason=metadata-only; receipt=missing-or-invalid'
@@ -454,7 +456,9 @@ import sys
 data = json.load(open(sys.argv[1]))
 assert len(data["items"]) == 1
 item = data["items"][0]
-assert item["status"] == "metadata-only"
+assert item["status"] == "no-captions"
+assert item["caption_state"] == "no-captions"
+assert item["metadata_state"] == "acquired"
 assert item["url"] == "https://www.youtube.com/watch?v=tGJTzahuapo"
 assert item["provenance_class"] == "metadata"
 assert item["evidence_eligible"] is True
@@ -463,6 +467,86 @@ assert item["files"] == []
 assert item["metadata"]["title"] == "Fixture metadata"
 assert "tracking-query" not in json.dumps(item)
 assert all(attempt["route"] in {"caption", "metadata"} for attempt in item["attempts"])
+PY
+
+scheduled_workspace="$test_root/scheduled-retry-workspace"
+mkdir -p "$scheduled_workspace/.wiki/raw" "$scheduled_workspace/.wiki/wiki" "$scheduled_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$scheduled_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$scheduled_workspace/.wiki/_index.md"
+scheduled_prompt='Riset video https://youtu.be/S78sl3d8D1I'
+scheduled_first=$(printf '%s' "{\"cwd\":\"$scheduled_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"scheduled\",\"turn_id\":\"one\",\"prompt\":\"$scheduled_prompt\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL=1 FAKE_YTDLP_METADATA=1 "$launcher" "$hook")
+printf '%s' "$scheduled_first" | grep -q 'status=retryable'
+scheduled_record=$(find "$scheduled_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
+python3 - "$scheduled_record" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+item = data["items"][0]
+assert item["status"] == "retryable"
+item["next_retry_at"] = 0
+path.write_text(json.dumps(data, sort_keys=True) + "\n")
+PY
+scheduled_log="$test_root/scheduled-fetches.log"
+printf '%s' "{\"cwd\":\"$scheduled_workspace\",\"hook_event_name\":\"SessionStart\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$scheduled_log" "$launcher" "$hook" >/dev/null
+python3 - "$scheduled_record" <<'PY'
+import json
+import sys
+
+item = json.load(open(sys.argv[1]))["items"][0]
+assert item["status"] == "ok"
+assert item["caption_state"] == "verified"
+assert item["next_retry_at"] is None
+PY
+test "$(wc -l <"$scheduled_log" | tr -d ' ')" -eq 1
+
+metadata_retry_workspace="$test_root/metadata-retry-workspace"
+mkdir -p "$metadata_retry_workspace/.wiki/raw" "$metadata_retry_workspace/.wiki/wiki" "$metadata_retry_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$metadata_retry_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$metadata_retry_workspace/.wiki/_index.md"
+metadata_retry_url='https://youtu.be/tGJTzahuapo?si=retry-metadata'
+metadata_retry_queue=$("$launcher" "$script" queue --workspace "$metadata_retry_workspace" --session-id metadata-retry --turn-id one "$metadata_retry_url")
+metadata_retry_id=$(printf '%s' "$metadata_retry_queue" | python3 -c 'import json,sys; print(json.load(sys.stdin)["queue_id"])')
+metadata_retry_first=$(FAKE_YTDLP_FAIL_CAPTION=1 FAKE_YTDLP_METADATA=1 "$launcher" "$script" drain --workspace "$metadata_retry_workspace" --queue-id "$metadata_retry_id" --deadline 10 --limit 1)
+printf '%s' "$metadata_retry_first" | grep -q '"status": "retryable"'
+metadata_retry_record=$(find "$metadata_retry_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
+metadata_retry_backup="$test_root/metadata-retry-old.json"
+python3 - "$metadata_retry_record" "$metadata_retry_backup" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, backup = map(Path, sys.argv[1:])
+data = json.loads(path.read_text())
+item = data["items"][0]
+assert item["status"] == "retryable"
+assert item["metadata_state"] == "acquired"
+old_metadata = item["metadata"]
+item["next_retry_at"] = 0
+path.write_text(json.dumps(data, sort_keys=True) + "\n")
+backup.write_text(json.dumps(old_metadata, sort_keys=True))
+PY
+metadata_retry_second=$("$launcher" "$script" drain --workspace "$metadata_retry_workspace" --queue-id "$metadata_retry_id" --deadline 10 --limit 1)
+printf '%s' "$metadata_retry_second" | grep -q '"status": "ok"'
+python3 - "$metadata_retry_record" "$metadata_retry_backup" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, backup = map(Path, sys.argv[1:])
+item = json.loads(path.read_text())["items"][0]
+old_metadata = json.loads(backup.read_text())
+assert item["status"] == "ok"
+assert item["caption_state"] == "verified"
+assert item["metadata_state"] == "acquired"
+assert item["metadata"] == old_metadata
+assert item["metadata"]["title"] == "Fixture metadata"
+assert item["receipt"]["provenance_class"] == "caption"
+assert item["receipt"]["files"]
 PY
 
 stale_context_workspace="$test_root/stale-context-workspace"
@@ -506,9 +590,9 @@ import sys
 from pathlib import Path
 
 data = json.loads(Path(sys.argv[1]).read_text())
-assert data["schema_version"] == 2
+assert data["schema_version"] == 3
 assert len(data["items"]) == 4
-assert all(item["status"] in {"ok", "no-captions", "metadata-only", "error", "blocked-install"} for item in data["items"])
+assert all(item["status"] in {"ok", "no-captions", "retryable", "exhausted", "error", "blocked-install"} for item in data["items"])
 assert all(item["attempt"] == 1 for item in data["items"])
 assert all(item["provenance_class"] == "caption" for item in data["items"])
 assert all(item["evidence_eligible"] is True for item in data["items"])
@@ -533,17 +617,17 @@ slow_output=$(printf '%s' "{\"cwd\":\"$slow_workspace\",\"hook_event_name\":\"Us
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_CAPTION_DELAY=11 FAKE_YTDLP_METADATA_DELAY=15 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$hook")
 slow_elapsed=$(( $(date +%s) - slow_started ))
 test "$slow_elapsed" -lt 45
-printf '%s' "$slow_output" | grep -q 'status=error'
-printf '%s' "$slow_output" | grep -q 'terminal=4; pending=0'
+printf '%s' "$slow_output" | grep -q 'status=retryable'
+printf '%s' "$slow_output" | grep -q 'terminal=0; pending=2'
 slow_record=$(find "$slow_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$slow_record" <<'PY'
 import json
 import sys
 
 data = json.load(open(sys.argv[1]))
-assert data["schema_version"] == 2
+assert data["schema_version"] == 3
 assert len(data["items"]) == 4
-assert all(item["status"] == "error" for item in data["items"])
+assert all(item["status"] in {"retryable", "pending"} for item in data["items"])
 assert all(item["transcript_eligible"] is False for item in data["items"])
 PY
 
@@ -574,7 +658,7 @@ import json
 import sys
 
 data = json.load(open(sys.argv[1]))
-assert data["schema_version"] == 2
+assert data["schema_version"] == 3
 assert len(data["items"]) == 1
 item = data["items"][0]
 assert {"provenance_class", "evidence_eligible", "transcript_eligible", "evidence_reason", "attempts", "metadata"} <= set(item)

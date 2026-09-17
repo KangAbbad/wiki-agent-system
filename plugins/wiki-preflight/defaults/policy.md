@@ -87,7 +87,7 @@ When a direct URL is missing, fails, or does not support the claim, the agent
 uses a bounded public discovery ladder: one public search, up to three result
 pages, and the same total deadline. Discovered pages are persisted as
 `web-extraction` evidence and remain `unverified` unless both gates pass.
-Pending and exhausted retryable records are drained by the bounded scheduled
+Pending and due retryable records are drained by the bounded scheduled
 SessionStart worker; a new user prompt is not required.
 
 When more valid URLs are present than the bounded immediate batch, the
@@ -102,9 +102,13 @@ caption attempts, bounded backoff, and the permitted metadata route share it,
 so metadata can use only the time remaining after captions and cannot extend
 the URL or hook deadline.
 
-Queue records use schema 2 for the evidence contract. A valid schema-1 record
-is migrated to schema 2 in memory and replaced atomically under the queue lock.
-Older runtimes treat schema 2 as a future schema and leave it untouched.
+Queue records use schema 3 for independent caption and metadata lifecycles. A
+valid schema-1 or schema-2 record is migrated forward and replaced atomically
+under the queue lock. Older runtimes treat schema 3 as a future schema and
+leave it untouched. Caption transport/process failures are `retryable` with a
+bounded `next_retry_at`; explicit subtitle absence is `no-captions`; exhausted
+retryable failures are `exhausted`. Metadata remains available as a separate
+`metadata_state=acquired` claim and never makes transcript evidence eligible.
 
 If the result is `install-approval-required`, pause that URL and report the
 bounded blocked status. The automatic hook never installs a dependency or
