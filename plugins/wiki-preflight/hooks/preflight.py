@@ -41,22 +41,60 @@ def atomic_json_write(path, data):
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
 
-def migrate_marker(marker):
-    if not marker.exists():
-        atomic_json_write(marker, {"schema_version": WORKSPACE_SCHEMA_VERSION})
-        return "created"
+def marker_path(root):
+    """Keep plugin-owned state outside the LLM Wiki content schema."""
+    return root / ".sessions" / "wiki-agent-system" / "marker.json"
+
+
+def marker_data(marker):
     try:
         data = json.loads(marker.read_text())
         version = data.get("schema_version")
     except (OSError, json.JSONDecodeError, AttributeError):
-        return "invalid"
+        return "invalid", None
     if version == WORKSPACE_SCHEMA_VERSION:
-        return "current"
+        return "current", data
     if version == 1:
         data["schema_version"] = WORKSPACE_SCHEMA_VERSION
+        return "migrated", data
+    return ("future" if isinstance(version, int) and version > WORKSPACE_SCHEMA_VERSION else "invalid"), None
+
+
+def migrate_marker(root):
+    """Migrate the legacy root marker without exposing it to wiki lint."""
+    marker = marker_path(root)
+    legacy = root / ".wiki-agent-system.json"
+    if marker.exists():
+        state, data = marker_data(marker)
+        if state in {"future", "invalid"}:
+            return state
+        if legacy.exists():
+            legacy_state, legacy_data = marker_data(legacy)
+            if legacy_state in {"future", "invalid"}:
+                return legacy_state
+            if data != legacy_data:
+                return "conflict"
+            try:
+                legacy.unlink()
+            except OSError:
+                return "invalid"
+        if state == "migrated":
+            atomic_json_write(marker, data)
+        return state
+    if legacy.exists():
+        state, data = marker_data(legacy)
+        if state in {"future", "invalid"}:
+            return state
+        # Write the runtime copy first.  An interrupted migration leaves the
+        # legacy marker intact rather than losing compatibility state.
         atomic_json_write(marker, data)
-        return "migrated"
-    return "future" if isinstance(version, int) and version > WORKSPACE_SCHEMA_VERSION else "invalid"
+        try:
+            legacy.unlink()
+        except OSError:
+            return "invalid"
+        return state
+    atomic_json_write(marker, {"schema_version": WORKSPACE_SCHEMA_VERSION})
+    return "created"
 
 def task_identity(payload):
     if not isinstance(payload, dict):
@@ -394,10 +432,9 @@ if root is None and cwd.is_dir():
     (root / "_index.md").write_text("# Workspace Wiki\n\n## Knowledge\n\n- [Raw](raw/)\n- [Articles](wiki/)\n- [Output](output/)\n")
 if root:
     ensure_sessions_ignored(root, cwd)
-    marker = root / ".wiki-agent-system.json"
-    marker_state = migrate_marker(marker)
-    if marker_state in {"future", "invalid"}:
-        detail = "newer" if marker_state == "future" else "invalid"
+    marker_state = migrate_marker(root)
+    if marker_state in {"future", "invalid", "conflict"}:
+        detail = "newer" if marker_state == "future" else "conflicting" if marker_state == "conflict" else "invalid"
         print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": f"Workspace Wiki Agent System schema is {detail}; do not modify it until a compatible plugin is installed."}}))
         raise SystemExit(0)
     if event == "SessionStart":

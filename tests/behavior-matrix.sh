@@ -18,10 +18,10 @@ run_hook() {
 
 # Empty, non-Git workspace bootstraps a valid schema-owned wiki.
 run_hook SessionStart >"$test_root/start.json"
-test -f "$workspace/.wiki/.wiki-agent-system.json"
+test -f "$workspace/.wiki/.sessions/wiki-agent-system/marker.json"
 test -f "$workspace/.wiki/_index.md"
 test ! -d "$workspace/.git"
-grep -q 'schema_version' "$workspace/.wiki/.wiki-agent-system.json"
+grep -q 'schema_version' "$workspace/.wiki/.sessions/wiki-agent-system/marker.json"
 
 # A research capture from one session appears in the next preflight context.
 mkdir -p "$workspace/.wiki/inbox/autosave"
@@ -71,10 +71,10 @@ test -f "$old"
 test -f "$workspace/.wiki/.trash/autosave/old.md"
 test ! -f "$old"
 
-# Existing valid wiki without marker upgrades additively by adding only marker.
-rm "$workspace/.wiki/.wiki-agent-system.json"
+# Existing valid wiki without marker upgrades additively by adding only runtime state.
+rm "$workspace/.wiki/.sessions/wiki-agent-system/marker.json"
 run_hook SessionStart >/dev/null
-test -f "$workspace/.wiki/.wiki-agent-system.json"
+test -f "$workspace/.wiki/.sessions/wiki-agent-system/marker.json"
 test -f "$workspace/.wiki/inbox/autosave/research.md"
 
 # A foreign .wiki is not initialized, written, or captured.

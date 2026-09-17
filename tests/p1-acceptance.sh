@@ -792,17 +792,24 @@ migration_marker() (
   }
   printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"SessionStart\"}" | \
     "$root/plugins/wiki-preflight/hooks/launcher.sh" "$root/plugins/wiki-preflight/hooks/preflight.py" >/dev/null
-  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"schema_version": 2}' \
-    "$workspace/.wiki/.wiki-agent-system.json"
-  printf '%s\n' '{"schema_version":1,"preserved":"yes"}' >"$workspace/.wiki/.wiki-agent-system.json"
+  marker="$workspace/.wiki/.sessions/wiki-agent-system/marker.json"
+  legacy="$workspace/.wiki/.wiki-agent-system.json"
+  python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"schema_version": 2}' "$marker"
+  test ! -e "$legacy"
+  printf '%s\n' '{"schema_version":2,"preserved":"legacy"}' >"$legacy"
+  rm "$marker"
+  run_hook SessionStart >/dev/null
+  python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); assert data["schema_version"] == 2 and data["preserved"] == "legacy"' "$marker"
+  test ! -e "$legacy"
+  printf '%s\n' '{"schema_version":1,"preserved":"yes"}' >"$marker"
   run_hook SessionStart >/dev/null
   python3 -c 'import json,sys; data=json.load(open(sys.argv[1])); assert data["schema_version"] == 2 and data["preserved"] == "yes"' \
-    "$workspace/.wiki/.wiki-agent-system.json"
-  printf '%s\n' '{"schema_version": 99}' >"$workspace/.wiki/.wiki-agent-system.json"
+    "$marker"
+  printf '%s\n' '{"schema_version": 99}' >"$marker"
   output=$(printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"SessionStart\"}" | "$root/plugins/wiki-preflight/hooks/launcher.sh" "$root/plugins/wiki-preflight/hooks/preflight.py")
   printf '%s' "$output" | grep -q 'schema is newer'
   python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"schema_version": 99}' \
-    "$workspace/.wiki/.wiki-agent-system.json"
+    "$marker"
 )
 
 config_forward_migration() (

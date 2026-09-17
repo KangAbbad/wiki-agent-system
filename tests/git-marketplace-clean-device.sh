@@ -51,7 +51,7 @@ printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"clean","t
 printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"clean","turn_id":"one","last_assistant_message":"Completed clean-device verification"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >"$root/stop.json"
 ! grep -q '"decision": "block"' "$root/stop.json" || fail "installed Stop hook interrupted user response"
 
-test -f "$root/workspace/.wiki/.wiki-agent-system.json" || fail "installed hook did not initialize workspace wiki"
+test -f "$root/workspace/.wiki/.sessions/wiki-agent-system/marker.json" || fail "installed hook did not initialize workspace wiki"
 find "$root/workspace/.wiki/inbox/autosave" -type f -name '*.md' -print -quit | grep -q . || fail "installed Stop hook did not capture"
 grep -R -q 'Completed clean-device verification' "$root/workspace/.wiki/inbox/autosave" || fail "installed Stop hook omitted final result"
 grep -q 'Workspace knowledge index:' "$root/start.json" || fail "installed hook did not emit preflight context"

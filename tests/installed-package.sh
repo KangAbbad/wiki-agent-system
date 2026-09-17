@@ -23,7 +23,7 @@ test "$(grep -c 'provision.py' "$root/plugin/hooks/hooks.json")" -eq 3
 test "$(grep -c 'PLUGIN_DATA/current/hooks/preflight.py' "$root/plugin/hooks/hooks.json")" -eq 3
 mkdir "$root/workspace"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"SessionStart\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
-test -f "$root/workspace/.wiki/.wiki-agent-system.json"
+test -f "$root/workspace/.wiki/.sessions/wiki-agent-system/marker.json"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"installed\",\"turn_id\":\"one\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 printf 'changed\n' >"$root/workspace/changed.txt"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"installed\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed installed verification\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >"$root/stop.json"

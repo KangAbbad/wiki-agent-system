@@ -25,7 +25,7 @@ grep -Fq '## Stop-owned capture' "$plugin_root/skills/wiki-workspace/SKILL.md"
 durable="$test_root/durable"
 mkdir "$durable"
 run_hook UserPromptSubmit "{\"cwd\":\"$durable\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"durable\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize the migration decision\"}" >/dev/null
-state=$(find "$durable/.wiki/.sessions" -type f -name '*.json')
+state=$(find "$durable/.wiki/.sessions/wiki-agent-system/finalizers" -type f -name '*.json')
 python3 - "$state" <<'PY'
 import json
 import sys
@@ -138,10 +138,11 @@ future="$test_root/future"
 mkdir -p "$future/.wiki/raw" "$future/.wiki/wiki"
 printf '%s\n' '# Workspace Wiki' >"$future/.wiki/config.md"
 printf '%s\n' '# Workspace Wiki' >"$future/.wiki/_index.md"
-printf '%s\n' '{"schema_version":99}' >"$future/.wiki/.wiki-agent-system.json"
+mkdir -p "$future/.wiki/.sessions/wiki-agent-system"
+printf '%s\n' '{"schema_version":99}' >"$future/.wiki/.sessions/wiki-agent-system/marker.json"
 run_hook UserPromptSubmit "{\"cwd\":\"$future\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"future\",\"turn_id\":\"one\",\"prompt\":\"Implement the future-schema task\"}" >/dev/null
 run_hook Stop "{\"cwd\":\"$future\",\"hook_event_name\":\"Stop\",\"session_id\":\"future\",\"turn_id\":\"one\",\"last_assistant_message\":\"Must stay read-only\"}" >/dev/null
-grep -Fq '{"schema_version":99}' "$future/.wiki/.wiki-agent-system.json"
+grep -Fq '{"schema_version":99}' "$future/.wiki/.sessions/wiki-agent-system/marker.json"
 test ! -e "$future/.wiki/inbox"
 
 future_state="$test_root/future-state"

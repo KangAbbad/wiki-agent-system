@@ -13,7 +13,9 @@ The gate requires all controls below:
 - semantic capture redacts credential-like values and persists required outcome;
 - canonicalization accepts attributable evidence with SHA-256 provenance and
   rejects sensitive source material;
-- bootstrap writes the current `.wiki-agent-system.json` schema marker;
+- bootstrap writes the current private runtime schema marker under
+  `.wiki/.sessions/wiki-agent-system/`, and atomically migrates a supported
+  legacy root marker without exposing it to `llm-wiki` lint;
 - behavior matrix covers non-Git bootstrap, knowledge transfer, retention
   quarantine, additive migration, foreign `.wiki` protection, and docs routing;
 - source and installed-package smoke tests pass;

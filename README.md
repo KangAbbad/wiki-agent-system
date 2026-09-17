@@ -72,9 +72,12 @@ mapping to `~/.config/llm-wiki/wiki-agent-system.json` (or
 `$XDG_CONFIG_HOME/llm-wiki/wiki-agent-system.json`). Plugin updates never
 overwrite this file.
 
-Both this file and `.wiki/.wiki-agent-system.json` use forward-only schema
+Both this file and the private runtime marker at
+`.wiki/.sessions/wiki-agent-system/marker.json` use forward-only schema
 migrations. A newer unknown schema is left untouched until a compatible plugin
-is installed.
+is installed. Existing root-level `.wiki-agent-system.json` markers migrate
+there atomically before the legacy file is removed, so `llm-wiki lint --fix`
+cannot quarantine plugin state.
 
 ## Upgrade safety
 
