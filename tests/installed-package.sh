@@ -6,8 +6,12 @@ cp -R plugins/wiki-preflight "$root/plugin"
 test -f "$root/plugin/skills/wiki-ambient/SKILL.md"
 grep -q 'projectless work' "$root/plugin/skills/wiki-ambient/SKILL.md"
 test -x "$root/plugin/scripts/youtube_fallback.py"
+test -x "$root/plugin/scripts/evidence_verification.py"
 "$root/plugin/hooks/launcher.sh" "$root/plugin/scripts/youtube_fallback.py" self-test >/dev/null
+"$root/plugin/hooks/launcher.sh" "$root/plugin/scripts/evidence_verification.py" self-test >/dev/null
 grep -q 'install-approval-required' "$root/plugin/defaults/policy.md"
+grep -q 'web-extraction' "$root/plugin/defaults/policy.md"
+grep -q 'evidence lifecycle' "$root/plugin/defaults/policy.md"
 grep -Fq '`UserPromptSubmit` owns ordinary YouTube ingestion' "$root/plugin/defaults/policy.md"
 grep -Fq 'automatic queue drain' "$root/plugin/defaults/policy.md"
 for document in \

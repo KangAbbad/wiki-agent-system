@@ -41,12 +41,14 @@ PLUGIN_ROOT="$installed_root" PLUGIN_DATA="$data_root" "$launcher" "$installed_r
 test -f "$data_root/current/hooks/preflight.py" || fail "marketplace runtime was not provisioned"
 cmp "$installed_root/hooks/preflight.py" "$data_root/current/hooks/preflight.py" || fail "stable runtime differs from installed candidate"
 cmp "$installed_root/scripts/wiki_ambient.py" "$data_root/current/scripts/wiki_ambient.py" || fail "stable runtime differs from installed capture writer"
+cmp "$installed_root/scripts/evidence_verification.py" "$data_root/current/scripts/evidence_verification.py" || fail "stable runtime differs from installed verifier"
 rm -rf "$installed_root"
 test ! -e "$installed_root" || fail "versioned marketplace cache was not removed"
 stable_root="$data_root/current"
 stable_launcher="$stable_root/hooks/launcher.sh"
 stable_hook="$stable_root/hooks/preflight.py"
 printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >"$root/start.json"
+"$stable_launcher" "$stable_root/scripts/evidence_verification.py" self-test >/dev/null
 printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"clean","turn_id":"one","prompt":"Research and synthesize the installed marketplace result"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >/dev/null
 printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"clean","turn_id":"one","last_assistant_message":"Completed clean-device verification"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >"$root/stop.json"
 ! grep -q '"decision": "block"' "$root/stop.json" || fail "installed Stop hook interrupted user response"

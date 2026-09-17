@@ -20,12 +20,16 @@ sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from youtube_fallback import YOUTUBE_HOSTS, acquire_file_lock, canonical_video, read_caption_receipt, release_file_lock
+from evidence_verification import PROVENANCE_CLASSES, canonical_public_url, eligibility
 
 
 CONFIG_TEMPLATE = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
 USER_CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "llm-wiki" / "wiki-agent-system.json"
 AMBIENT_SCHEMA_VERSION = 4
 CAPTURE_SCHEMA_VERSION = 2
+EVIDENCE_SCHEMA_VERSION = 1
+EVIDENCE_PROVENANCE_CLASSES = ["caption", "web-extraction", "metadata", "machine-transcription", "none"]
+EVIDENCE_LIFECYCLE_STATES = ["acquired", "unverified", "verifying", "verified", "exhausted", "blocked"]
 CAPTURE_SCOPES = frozenset({"workspace", "user", "personal", "uncertain"})
 LIFECYCLE_STATES = frozenset({"pending-curation", "canonical", "superseded", "retracted"})
 LIFECYCLE_TRANSITIONS = {
@@ -174,8 +178,32 @@ def load():
     if isinstance(data.get("retention"), dict) and "max_bytes" not in data["retention"]:
         data["retention"]["max_bytes"] = 1073741824
         migrated = True
+    evidence = data.get("evidence")
+    if evidence is None:
+        data["evidence"] = {
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
+            "provenance_classes": EVIDENCE_PROVENANCE_CLASSES,
+            "lifecycle_states": EVIDENCE_LIFECYCLE_STATES,
+            "public_sources_only": True,
+            "max_source_bytes": 524288,
+            "max_attempts": 3,
+        }
+        migrated = True
+    elif isinstance(evidence, dict) and type(evidence.get("schema_version")) is int and evidence["schema_version"] > EVIDENCE_SCHEMA_VERSION:
+        raise SystemExit("evidence configuration schema is newer; install a compatible runtime before writing")
     if data.get("schema_version") != AMBIENT_SCHEMA_VERSION or not isinstance(data.get("workspace_topics"), dict) or not isinstance(data.get("topics"), dict):
         raise SystemExit("invalid ambient config schema")
+    evidence = data.get("evidence")
+    if (
+        not isinstance(evidence, dict)
+        or evidence.get("schema_version") != EVIDENCE_SCHEMA_VERSION
+        or evidence.get("provenance_classes") != EVIDENCE_PROVENANCE_CLASSES
+        or evidence.get("lifecycle_states") != EVIDENCE_LIFECYCLE_STATES
+        or evidence.get("public_sources_only") is not True
+        or evidence.get("max_source_bytes") != 524288
+        or evidence.get("max_attempts") != 3
+    ):
+        raise SystemExit("invalid evidence configuration schema")
     capture = data.get("capture")
     if (
         not isinstance(capture, dict)
@@ -917,7 +945,7 @@ def source_slug(value: str) -> str:
     return slug[:80] or "source"
 
 
-def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=None):
+def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=None, provenance_class=None, retrieval_method="local-file"):
     """Promote only supplied, attributable, non-sensitive source material to raw/."""
     load()
     route = json.loads(capture_resolve(cwd))
@@ -927,6 +955,7 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise SystemExit("source URL must be an absolute http(s) URL")
     receipt = None
+    evidence_status = "unverified"
     if (parsed.hostname or "").lower().rstrip(".") in YOUTUBE_HOSTS:
         try:
             video_id, source_url = canonical_video(source_url)
@@ -944,6 +973,22 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=
             )
         except (OSError, TypeError, ValueError) as error:
             raise SystemExit(f"caption receipt rejected: {error}") from error
+        provenance_class = "caption"
+        evidence_status = "verified"
+    else:
+        provenance_class = provenance_class or "web-extraction"
+        if provenance_class not in PROVENANCE_CLASSES or provenance_class == "caption":
+            raise SystemExit("non-YouTube evidence provenance is invalid")
+        try:
+            source_url = canonical_public_url(source_url)
+        except ValueError as error:
+            raise SystemExit(f"source URL is not public: {error}") from error
+    if not isinstance(retrieval_method, str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,39}", retrieval_method):
+        raise SystemExit("retrieval method is invalid")
+    try:
+        evidence_eligible, transcript_eligible = eligibility(provenance_class, evidence_status)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     clean_title = title.strip()
     if not clean_title or "\n" in clean_title or SENSITIVE.search(clean_title):
         raise SystemExit("source title is empty, multiline, or sensitive")
@@ -976,7 +1021,7 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=
     destination = Path(route["local_wiki"]) / "raw"
     destination.mkdir(mode=0o700, parents=True, exist_ok=True)
     output = destination / f"{source_slug(clean_title)}-{digest[:12]}.md"
-    if receipt and output.is_symlink():
+    if output.is_symlink():
         raise SystemExit("existing canonical evidence is a symlink")
     origin_workspace = workspace_identity(route, Path(route["cwd"]))
     canonical_uri = canonical_capture_uri("workspace", str(origin_workspace), f"source-{digest}")
@@ -986,17 +1031,22 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=
         receipt_fields = (
             f"receipt_id: {receipt['receipt_id']}\n"
             f"transcript_sha256: {digest}\n"
-            "provenance_class: caption\n"
-            "evidence_status: verified\n"
             if receipt
             else ""
         )
         content = f"""---
+schema: 1
 type: raw-source
 title: {clean_title}
 source_url: {source_url}
+retrieval_method: {retrieval_method}
+retrieved_at: {retrieved_at.isoformat()}
 retrieved: {retrieved}
 content_sha256: {digest}
+provenance_class: {provenance_class}
+evidence_status: {evidence_status}
+evidence_eligible: {str(evidence_eligible).lower()}
+transcript_eligible: {str(transcript_eligible).lower()}
 {receipt_fields}scope: workspace
 canonical_uri: {json.dumps(canonical_uri)}
 origin_workspace: {json.dumps(str(origin_workspace))}
@@ -1011,6 +1061,18 @@ valid_until: null
 {body.rstrip()}
         """
         atomic_write(output, content)
+    if output.exists() and not receipt:
+        try:
+            existing = frontmatter_fields(output.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SystemExit) as error:
+            raise SystemExit("existing canonical evidence is unreadable") from error
+        expected = {
+            "provenance_class": provenance_class,
+            "evidence_status": evidence_status,
+            "content_sha256": digest,
+        }
+        if any(existing.get(key) != value for key, value in expected.items() if key in existing):
+            raise SystemExit("existing canonical evidence provenance does not match")
     if receipt:
         try:
             existing = frontmatter_fields(output.read_text(encoding="utf-8"))
@@ -1239,6 +1301,8 @@ def main():
     canonicalize_parser.add_argument("--source-url", required=True)
     canonicalize_parser.add_argument("--title", required=True)
     canonicalize_parser.add_argument("--receipt", "--receipt-id", dest="receipt_id")
+    canonicalize_parser.add_argument("--provenance-class", choices=sorted(PROVENANCE_CLASSES - {"caption", "none"}))
+    canonicalize_parser.add_argument("--retrieval-method", default="local-file")
     transition_parser = commands.add_parser("transition")
     transition_parser.add_argument("--cwd", default=".")
     transition_parser.add_argument("--record", required=True)
@@ -1273,7 +1337,15 @@ def main():
             args.scope,
         )))
     elif args.command == "canonicalize":
-        canonicalize(args.cwd, args.source, args.source_url, args.title, args.receipt_id)
+        canonicalize(
+            args.cwd,
+            args.source,
+            args.source_url,
+            args.title,
+            args.receipt_id,
+            args.provenance_class,
+            args.retrieval_method,
+        )
     elif args.command == "transition":
         transition_record(args.cwd, args.record, args.status, args.supersedes)
     elif args.command == "retrieve":

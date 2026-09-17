@@ -6,6 +6,7 @@ sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from wiki_ambient import capture, capture_intent, capture_key, parse_capture_message, redact, retrieve_memory
+from evidence_verification import drain_due_queue as drain_public_verification_queue, preflight_context as public_verification_context
 from youtube_fallback import (
     QueueError,
     canonical_video,
@@ -253,6 +254,14 @@ def run_scheduled_retention(root):
         return
 
 
+def run_scheduled_public_verification(root):
+    """Drain due public evidence claims without requiring a new prompt."""
+    try:
+        drain_public_verification_queue(root, deadline=4.0, limit=2)
+    except (OSError, SystemExit, TypeError, ValueError):
+        return
+
+
 def prompt_text(payload):
     for key in ("prompt", "user_prompt", "user_message", "message"):
         value = payload.get(key)
@@ -369,7 +378,7 @@ def youtube_preflight_context(root, cwd, prompt, payload):
             elif files:
                 lines.append(f"  stale_caption_files={'; '.join(safe_text(str(file), 120) for file in files[:8])}")
             if item["status"] == "blocked-install":
-                lines.append("  installation=blocked; explicit approval is required before a new retry attempt")
+                lines.append("  installation=blocked; no user action requested; report bounded verification status")
             if transcript == "not-available":
                 lines.append("  transcript=not-available; stale/unreceipted captions, metadata-only, and machine-transcription cannot support transcript claims")
         if len(urls) > YOUTUBE_PREFLIGHT_MAX_URLS:
@@ -439,12 +448,20 @@ if root:
         raise SystemExit(0)
     if event == "SessionStart":
         run_scheduled_retention(root)
+        run_scheduled_public_verification(root)
     if event == "UserPromptSubmit":
         write_finalizer_state(root, payload, prompt)
     if event == "Stop":
         stop_owned_capture(root, cwd, payload)
     retrieval = safe_retrieve(cwd, prompt) if event == "UserPromptSubmit" else None
     youtube_context = youtube_preflight_context(root, cwd, prompt, payload) if event == "UserPromptSubmit" else ""
+    if event == "UserPromptSubmit":
+        try:
+            public_context = public_verification_context(root, prompt)
+        except (OSError, SystemExit, TypeError, ValueError):
+            public_context = "Public evidence verification: status=unverified; agent-owned bounded lookup/retry required."
+    else:
+        public_context = ""
     policy = (Path(__file__).resolve().parents[1] / "defaults" / "policy.md").read_text().strip()
     index = (root / "_index.md").read_text()[:4000]
     captures = sorted((root / "inbox" / "autosave").glob("*.md"))[-3:]
@@ -452,5 +469,6 @@ if root:
     recent_context = f"\nRecent captures:\n{recent}" if recent else ""
     memory_context = f"\n{retrieval_context(retrieval)}" if retrieval and retrieval.get("intent", {}).get("matched") else ""
     youtube_context = f"\n{youtube_context}" if youtube_context else ""
-    text = f"{policy}\nWorkspace knowledge index:\n{index}{memory_context}{youtube_context}{recent_context}"
+    public_context = f"\n{public_context}" if public_context else ""
+    text = f"{policy}\nWorkspace knowledge index:\n{index}{memory_context}{youtube_context}{public_context}{recent_context}"
     print(json.dumps({"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name", "SessionStart"), "additionalContext": text}}))

@@ -62,13 +62,33 @@ receipt is reported as stale/unreceipted and must not be used for transcript
 claims.
 
 Every helper and queue result carries the canonical URL, a `provenance_class`
-(`caption`, `metadata`, or `none`), `evidence_eligible`, and
+(`caption`, `web-extraction`, `metadata`, `machine-transcription`, or `none`), `evidence_eligible`, and
 `transcript_eligible`. Only a fresh regular VTT bound to a valid receipt has
 caption and transcript eligibility. `metadata-only` may support metadata
 claims only; `no-captions`, stale/unreceipted captions, failures, and blocked
 installation are not transcript evidence and must not be used to synthesize
 transcript facts. Local STT is always labeled `machine-transcription` with
 both eligibility flags false.
+
+Evidence lifecycle is separate from capture lifecycle:
+`acquired → unverified → verifying → verified | exhausted | blocked`.
+`web-extraction` preserves public content with its retrieval method, timestamp,
+URL, and hash, but never becomes an official caption. Report the provenance
+class and lifecycle status exactly as stored.
+
+Public-source verification has two independent gates. A source host is never an
+authority merely because it appeared in the prompt or contains words such as
+`docs`, `vendor`, or `official`; an authority binding must be explicit
+(`authority_host=<public-host>`) or supplied by a trusted caller. `verified`
+also requires bounded claim-to-evidence matching in the acquired page content.
+Host matching alone is always `unverified`.
+
+When a direct URL is missing, fails, or does not support the claim, the agent
+uses a bounded public discovery ladder: one public search, up to three result
+pages, and the same total deadline. Discovered pages are persisted as
+`web-extraction` evidence and remain `unverified` unless both gates pass.
+Pending and exhausted retryable records are drained by the bounded scheduled
+SessionStart worker; a new user prompt is not required.
 
 When more valid URLs are present than the bounded immediate batch, the
 remaining URLs enter the agent-owned automatic queue drain during the same
@@ -86,14 +106,14 @@ Queue records use schema 2 for the evidence contract. A valid schema-1 record
 is migrated to schema 2 in memory and replaced atomically under the queue lock.
 Older runtimes treat schema 2 as a future schema and leave it untouched.
 
-If the result is `install-approval-required`, pause that URL and request
-explicit approval in the current execution before starting an approved retry.
-The automatic hook never grants installation approval.
+If the result is `install-approval-required`, pause that URL and report the
+bounded blocked status. The automatic hook never installs a dependency or
+claims a caption that was not acquired.
 
 The approved installer uses the current Python interpreter's user site and the
 exact package pin `yt-dlp==2026.08.19`; it does not run Homebrew or an unpinned
 package install. If Python's user-site installation is unavailable, fail loudly
-and let the user install the pinned package through their device policy.
+and report the dependency as unavailable without delegating routine setup.
 
 The helper accepts only one YouTube video per invocation, canonicalizes the URL,
 validates a 5–600 second total per-URL budget, retries up to three times with bounded
@@ -115,8 +135,8 @@ service, supplies cookies, or bypasses access controls. Its output is a fresh
 `provenance_class=machine-transcription`, `evidence_eligible=false`, and
 `transcript_eligible=false`; it is usable only when explicitly characterized as
 machine transcription, never as an official caption or attributable source.
-If prerequisites are absent, request ordinary-language approval for one-time
-local setup; never expose a shell command to the user.
+If prerequisites are absent, report `machine-transcription` as unavailable;
+never expose a shell command or invent a transcript.
 
 When `yt-dlp` exits non-zero, any new or changed VTT from that attempt is removed
 before retry or return. Unchanged pre-existing VTT files are not evidence and are
@@ -134,3 +154,17 @@ access controls. Record the helper's JSON status, receipt ID, source hash, and
 receipt-bound caption file paths in the Wiki evidence provenance.
 Canonicalization of a caption requires that receipt ID; metadata-only,
 stale/unreceipted captions, and machine transcription cannot satisfy that gate.
+
+## Evidence-aware final reports
+
+Final reports must state acquired sources, provenance class, evidence lifecycle,
+and confidence as facts. Public vendor, database, documentation, and
+provenance gaps remain agent-owned: continue bounded public lookup and durable
+retry when possible, then report `unverified` or `exhausted`. Never write
+`Skipped`, `verify later`, `please verify`, or an equivalent routine user task.
+
+Ask the user for one precise authority only when the missing boundary is a
+required private credential or source, access control, or destructive production verification,
+or an explicit authority decision. Name that boundary and keep the rest of the
+report bounded; do not expose runtime paths, secrets, raw transcripts, or tool
+output.

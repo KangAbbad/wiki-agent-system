@@ -49,7 +49,26 @@ video detail, the agent may run the bundled local-STT fallback outside hook
 time. It is permitted only for public audio and an already approved, installed
 local model/runtime; its output is `machine-transcription`, never caption or
 canonical evidence. Never ask the user to run a command. If prerequisites are
-missing, request ordinary-language approval for the one-time local setup.
+missing, report the bounded unavailable status and continue with the evidence
+class actually acquired.
+
+For every evidence-bearing result, report the source, provenance class,
+evidence lifecycle (`acquired`, `unverified`, `verifying`, `verified`,
+`exhausted`, or `blocked`), and confidence. Public vendor, database,
+documentation, and provenance verification remains agent-owned; continue the
+bounded lookup/retry and report `unverified` or `exhausted` when it cannot be
+verified. Do not emit `Skipped`, `verify later`, `please verify`, or equivalent
+routine user delegation. Ask for user action only for a required private
+credential/source, access-control boundary, destructive production verification,
+or an explicit authority decision, naming that exact boundary.
+
+Authority is never inferred from a prompt URL or words such as `docs`, `vendor`,
+or `official`. `verified` requires an explicit/trusted authority binding and a
+bounded claim-to-evidence match in the fetched page; host matching alone is
+insufficient. When direct evidence is absent or insufficient, the runtime uses
+the bounded public discovery ladder and keeps acquired pages `unverified` until
+both gates pass. Pending retryable records are drained by the scheduled bounded
+worker without requiring another user prompt.
 
 ## Invariants
 

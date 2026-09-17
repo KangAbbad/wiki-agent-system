@@ -844,6 +844,26 @@ launcher_only_runtime() {
     "$root/README.md" "$root/plugins" "$root/tests"
 }
 
+release_integrity() (
+  cd "$root" || exit 1
+  pycache=$(mktemp -d)
+  PYTHONPYCACHEPREFIX="$pycache" python3 -m py_compile $(find plugins/wiki-preflight -type f -name '*.py' -print)
+  find . -type f -name '*.sh' -exec sh -n {} +
+  python3 - "$root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for path in root.rglob("*.json"):
+    if ".git" in path.parts:
+        continue
+    json.loads(path.read_text(encoding="utf-8"))
+PY
+  git diff --check
+  ! rg -n --hidden --glob '!**/.git/**' '(AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN [A-Z ]*PRIVATE KEY-----|https?://[^[:space:]]+:[^[:space:]@]+@)' plugins tests
+)
+
 check 'plugin manifest' test -f "$root/plugins/wiki-preflight/.codex-plugin/plugin.json"
 check 'ambient configuration schema' "$root/plugins/wiki-preflight/hooks/launcher.sh" "$root/plugins/wiki-preflight/scripts/wiki_ambient.py" validate
 check 'user-scope configuration survives plugin replacement' sh "$root/tests/config-persistence.sh" "$root/plugins/wiki-preflight"
@@ -865,6 +885,8 @@ check 'privacy, collaboration, and Git boundaries' privacy_and_boundaries
 check 'migration/version marker' migration_marker
 check 'user configuration future-schema protection' config_forward_migration
 check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-preflight"
+check 'autonomous evidence verification' from_root sh tests/evidence-verification.sh
+check 'source integrity and release gate' release_integrity
 check 'source clean-device smoke test' from_root sh tests/clean-device.sh
 check 'installed-package smoke test' from_root sh tests/installed-package.sh
 check 'YouTube caption fallback' from_root sh tests/youtube-fallback.sh

@@ -52,6 +52,9 @@ test "$(find "$casual/.wiki/inbox" -type f -name 'session-*.md' | wc -l | tr -d 
 policy="$test_root/plugin/defaults/policy.md"
 grep -q 'knowledge artifacts in `.wiki/`' "$policy"
 grep -q 'explicit product/developer documentation' "$policy"
+grep -q 'Public vendor, database' "$policy"
+grep -q 'evidence lifecycle' "$policy"
+grep -q 'routine user task' "$policy"
 ! grep -q 'run.*semantic finalizer\|python3.*wiki_ambient.py' "$policy"
 
 # The marketplace package includes the global policy required for projectless
@@ -59,6 +62,13 @@ grep -q 'explicit product/developer documentation' "$policy"
 ambient="$test_root/plugin/skills/wiki-ambient/SKILL.md"
 test -f "$ambient"
 grep -q 'projectless work' "$ambient"
+grep -q 'routine user delegation' "$ambient"
+
+# A public verification gap remains agent-owned; an authority boundary is precise.
+gap_prompt=$(printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"boundary\",\"turn_id\":\"one\",\"prompt\":\"Verify production drop database docs https://example.test/spec\"}" | "$launcher" "$hook")
+printf '%s' "$gap_prompt" | grep -q 'status=blocked'
+printf '%s' "$gap_prompt" | grep -q 'authority_request=destructive production verification'
+! printf '%s' "$gap_prompt" | grep -q 'Skipped'
 
 # Retention dry-run finds expired autosaves; apply quarantines without deleting.
 old="$workspace/.wiki/inbox/autosave/old.md"

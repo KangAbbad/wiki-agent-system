@@ -16,6 +16,17 @@
   "redact_sensitive": true,
   "scope_resolution": "automatic",
   "knowledge_preflight": true,
+  "evidence": {
+    "schema_version": 1,
+    "provenance_classes": ["caption", "web-extraction", "metadata", "machine-transcription", "none"],
+    "lifecycle_states": ["acquired", "unverified", "verifying", "verified", "exhausted", "blocked"],
+    "public_sources_only": true,
+    "max_source_bytes": 524288,
+    "max_attempts": 3,
+    "max_retries": 3,
+    "max_discovery_results": 3,
+    "scheduled_drain_seconds": 4
+  },
   "workspace_start": {
     "initialize_local_wiki": true,
     "empty_workspace_is_workspace_scope": true

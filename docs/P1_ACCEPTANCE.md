@@ -13,6 +13,10 @@ The gate requires all controls below:
 - semantic capture redacts credential-like values and persists required outcome;
 - canonicalization accepts attributable evidence with SHA-256 provenance and
   rejects sensitive source material;
+- public web extraction preserves URL, retrieval method/time, hash, provenance,
+  and an explicit evidence lifecycle without upgrading it to caption evidence;
+- bounded public verification deduplicates claims, retains unverified/exhausted
+  outcomes, and requests users only for precise authority boundaries;
 - bootstrap writes the current private runtime schema marker under
   `.wiki/.sessions/wiki-agent-system/`, and atomically migrates a supported
   legacy root marker without exposing it to `llm-wiki` lint;
@@ -21,5 +25,7 @@ The gate requires all controls below:
 - source and installed-package smoke tests pass;
 - real Codex coexistence with `wiki@llm-wiki` passes;
 - a fresh `CODEX_HOME` installs from the public Git marketplace and passes.
+- Python compilation, shell syntax, JSON validation, diff hygiene, and a
+  credential-pattern scan pass before release.
 
 Any absent, skipped, or failing control is a P1 failure.

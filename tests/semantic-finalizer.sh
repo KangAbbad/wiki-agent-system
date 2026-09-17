@@ -17,10 +17,17 @@ mkdir "$context_workspace"
 context=$(run_hook UserPromptSubmit "{\"cwd\":\"$context_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"context\",\"turn_id\":\"one\"}")
 printf '%s\n' "$context" | grep -Fq 'Stop hook owns the default semantic capture'
 printf '%s\n' "$context" | grep -Fq 'No command is required'
+printf '%s\n' "$context" | grep -Fq 'evidence lifecycle'
+printf '%s\n' "$context" | grep -Fq '`unverified` or `exhausted`'
+printf '%s\n' "$context" | grep -Fq 'required private credential or source'
+printf '%s\n' "$context" | grep -Fq 'destructive production verification'
+printf '%s\n' "$context" | grep -Fq 'Public vendor, database'
 ! printf '%s\n' "$context" | grep -Fq 'Before sending the final response for meaningful workspace work, run'
 ! printf '%s\n' "$context" | grep -Eq 'python3.*wiki_ambient.py'
 ! grep -Fq '### Required semantic finalizer' "$plugin_root/skills/wiki-workspace/SKILL.md"
 grep -Fq '## Stop-owned capture' "$plugin_root/skills/wiki-workspace/SKILL.md"
+grep -Fq 'routine user delegation' "$plugin_root/skills/wiki-workspace/SKILL.md"
+grep -Fq 'routine user delegation' "$plugin_root/skills/wiki-ambient/SKILL.md"
 
 durable="$test_root/durable"
 mkdir "$durable"
@@ -167,5 +174,16 @@ grep -Fq 'Keep merge' "$capture"
 grep -Fq '`src/main.py`' "$capture"
 grep -Fq 'tests passed' "$capture"
 ! grep -Fq 'token=hidden' "$capture"
+
+public_gap="$test_root/public-gap"
+mkdir "$public_gap"
+public_context=$(run_hook UserPromptSubmit "{\"cwd\":\"$public_gap\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"public-gap\",\"turn_id\":\"one\",\"prompt\":\"Verify production drop database docs https://example.test/spec\"}")
+printf '%s' "$public_context" | grep -Fq 'status=blocked'
+printf '%s' "$public_context" | grep -Fq 'authority_request=destructive production verification'
+! printf '%s' "$public_context" | grep -Fq 'Skipped'
+run_hook Stop "{\"cwd\":\"$public_gap\",\"hook_event_name\":\"Stop\",\"session_id\":\"public-gap\",\"turn_id\":\"one\",\"last_assistant_message\":\"Verification status: unverified; durable retry remains agent-owned.\"}" >/dev/null
+gap_capture=$(find "$public_gap/.wiki/inbox/autosave" -type f -name 'session-*.md')
+grep -Fq 'unverified' "$gap_capture"
+grep -Fq 'agent-owned' "$gap_capture"
 
 echo 'semantic finalizer contract passed'
