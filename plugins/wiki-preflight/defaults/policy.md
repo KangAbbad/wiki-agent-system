@@ -90,17 +90,22 @@ pages, and the same total deadline. Discovered pages are persisted as
 Pending and due retryable records are drained by the bounded scheduled
 SessionStart worker; a new user prompt is not required.
 
-When more valid URLs are present than the bounded immediate batch, the
-remaining URLs enter the agent-owned automatic queue drain during the same
-task. No user-side shell action or repeated prompt is required. Hook-owned
-processing uses the provisioned stable runtime internally; no terminal command
-is part of this workflow.
+YouTube caption work uses a durable foreground controller. `UserPromptSubmit`
+creates or resolves one job for the measured `session_id` + `turn_id` identity,
+then performs one bounded caption step. If the job is still `pending`,
+`running`, or `retryable`, the Stop hook emits a compact `decision=block`
+continuation with only the opaque job reference, next action, revision, and
+loop count. The continuation re-enters `UserPromptSubmit`; no user-side shell
+action, repeated prompt, daemon, or scheduler is required. `Interrupt` returns
+uncompleted claims to `pending` and preserves the same checkpoint.
 
-The hook gives both drain passes one shared 40-second YouTube budget, below the
-45-second UserPromptSubmit limit. Each URL has one total helper deadline;
-caption attempts, bounded backoff, and the permitted metadata route share it,
-so metadata can use only the time remaining after captions and cannot extend
-the URL or hook deadline.
+The controller gives one job a shared 40-second budget, four continuation
+steps, one allowlisted action at a time, and the existing per-queue retry cap.
+Each URL has one total helper deadline; caption attempts, bounded backoff, and
+the permitted metadata route share it, so metadata can use only the time
+remaining after captions and cannot extend the URL or job deadline. Its state is
+atomic private operational data under `.wiki/.sessions/` and contains no prompt,
+transcript, raw stderr, or secret.
 
 Queue records use schema 3 for independent caption and metadata lifecycles. A
 valid schema-1 or schema-2 record is migrated forward and replaced atomically
@@ -112,16 +117,45 @@ retryable failures are `exhausted`. Metadata remains available as a separate
 
 If the result is `install-approval-required`, pause that URL and report the
 bounded blocked status. The automatic hook never installs a dependency or
-claims a caption that was not acquired.
+claims a caption that was not acquired. A foreground continuation always
+honors `next_retry_at`; it must not force-claim a retry before its backoff is
+due.
+
+Stop finalization has two gates. Receipt validation produces `evidence-ready`,
+not completion. `verified` additionally requires exactly one bounded
+`youtube-knowledge` artifact under Wiki `wiki/`, with its artifact hash,
+queue/source binding, receipt IDs, every receipt caption hash, claim-to-
+evidence references, `provenance_class=caption`, `evidence_status=verified`,
+`grounded=true`, and `quality_status=verified`. Its synthesis must contain
+the receipt-bound sources and the required quality sections. Missing, stale,
+tampered, unrelated, or duplicate artifacts keep Stop blocked. `exhausted`
+and `blocked` may end only with an explicit sanitized report containing
+terminal status, provenance, and an ineligible transcript result; metadata,
+web extraction, stale captions, and machine transcription never become caption
+evidence. Nonterminal jobs cannot create a semantic completion capture.
 
 The approved installer uses the current Python interpreter's user site and the
 exact package pin `yt-dlp==2026.08.19`; it does not run Homebrew or an unpinned
 package install. If Python's user-site installation is unavailable, fail loudly
 and report the dependency as unavailable without delegating routine setup.
 
+The plugin package vendors the adapter and its pure-Python runtime dependency
+bundle under `vendor/`, including upstream license texts, a hash manifest for
+every shipped file, and separate source-wheel hashes; provisioning copies that
+bundle into stable `PLUGIN_DATA` with the hook code.
+The launcher loads the bundle from that stable runtime, so a clean device does
+not need package installation or network access for adapter import.
+
 The helper accepts only one YouTube video per invocation, canonicalizes the URL,
 validates a 5–600 second total per-URL budget, retries up to three times with bounded
-backoff, and never downloads the video. `no-captions` means no new caption file
+backoff, and never downloads the video. Its `auto` adapter first uses the pinned,
+pre-provisioned `youtube-transcript-api==1.2.4` when available: it lists tracks,
+selects the configured language with manual tracks ahead of generated tracks,
+fetches timestamped snippets, normalizes them to VTT, and binds adapter/version,
+track metadata, translation origin, and normalized hash into a schema-2 receipt.
+If that optional runtime is absent or mismatched, the helper falls back to
+`yt-dlp`; it never installs the adapter at hook runtime. Translated tracks are
+explicitly derived reading aids and are not transcript-eligible. `no-captions` means no new caption file
 was produced. `stale-captions-ignored` means matching files already existed and
 were deliberately excluded; neither status is a transcript. If no captions are
 available, run the permitted metadata route only after the caption outcome is

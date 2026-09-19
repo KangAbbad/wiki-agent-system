@@ -34,6 +34,9 @@ export PATH="$test_root/bin:$PATH"
 
 PLUGIN_ROOT="$runtime_root" PLUGIN_DATA="$data_root" "$runtime_root/hooks/launcher.sh" "$runtime_root/hooks/provision.py"
 test -f "$data_root/current/hooks/preflight.py"
+sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/vendor-runtime-import.sh" "$data_root/current"
+fallback_vendor="$test_root/fallback-vendor"
+mv "$data_root/current/vendor" "$fallback_vendor"
 rm -rf "$runtime_root"
 payload=$(printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$workspace")
 printf '%s' "$payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/output.json"
@@ -67,6 +70,7 @@ boundary_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","ses
 printf '%s' "$boundary_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/boundary-context.json"
 grep -q 'status=blocked' "$test_root/boundary-context.json"
 grep -q 'authority_request=destructive production verification' "$test_root/boundary-context.json"
+mv "$fallback_vendor" "$data_root/current/vendor"
 
 set_version() {
   root=$1
@@ -101,6 +105,7 @@ test -f "$capture"
 provision "$new_root"
 test -f "$data_root/current/hooks/preflight.py"
 cmp "$new_root/scripts/evidence_verification.py" "$data_root/current/scripts/evidence_verification.py"
+sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/vendor-runtime-import.sh" "$data_root/current"
 provision "$old_root"
 printf '%s' "$old_payload" | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >/dev/null
 test -f "$capture"

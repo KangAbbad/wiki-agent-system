@@ -24,6 +24,18 @@
         ]
       }
     ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_ROOT/hooks/provision.py\" >/dev/null 2>&1 || true; \"$PLUGIN_ROOT/hooks/launcher.sh\" \"$PLUGIN_DATA/current/hooks/preflight.py\"",
+            "timeout": 3,
+            "statusMessage": "Checkpointing workspace knowledge"
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

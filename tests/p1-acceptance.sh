@@ -869,6 +869,7 @@ check 'ambient configuration schema' "$root/plugins/wiki-preflight/hooks/launche
 check 'user-scope configuration survives plugin replacement' sh "$root/tests/config-persistence.sh" "$root/plugins/wiki-preflight"
 check 'user-scope configuration migration' sh "$root/tests/config-migration.sh" "$root/plugins/wiki-preflight"
 check 'agent-side semantic finalizer contract' sh "$root/tests/semantic-finalizer.sh" "$root/plugins/wiki-preflight"
+check 'Codex Stop hook contract fixture' sh "$root/tests/codex-stop-continuation.sh"
 check 'per-task semantic capture deduplication' sh "$root/tests/capture-dedup.sh" "$root/plugins/wiki-preflight"
 check 'quota report and operational-data quarantine' sh "$root/tests/quota-retention.sh" "$root/plugins/wiki-preflight"
 check 'scheduled, locked, fail-open retention' scheduled_retention
@@ -888,8 +889,10 @@ check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-
 check 'autonomous evidence verification' from_root sh tests/evidence-verification.sh
 check 'source integrity and release gate' release_integrity
 check 'source clean-device smoke test' from_root sh tests/clean-device.sh
+check 'vendored runtime integrity tamper regression' from_root sh tests/vendor-runtime-integrity.sh
 check 'installed-package smoke test' from_root sh tests/installed-package.sh
 check 'YouTube caption fallback' from_root sh tests/youtube-fallback.sh
+check 'YouTube transcript API adapter' from_root sh tests/youtube-transcript-api.sh
 check 'live coexistence test' from_root sh tests/live-coexistence.sh
 check 'Git marketplace clean-device test' env WIKI_MARKETPLACE_SOURCE="$root" WIKI_MARKETPLACE_REF= sh "$root/tests/git-marketplace-clean-device.sh"
 check 'launcher-only plugin runtime' launcher_only_runtime

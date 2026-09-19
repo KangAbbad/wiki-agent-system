@@ -85,6 +85,12 @@ On task start, the hook provisions the installed runtime into stable plugin
 data. After a later update removes a versioned cache, existing tasks continue
 using that stable runtime; a new task provisions the newer runtime.
 
+The optional YouTube transcript adapter and its pinned pure-Python dependencies
+are vendored under `plugins/wiki-preflight/vendor/`, including upstream license
+texts, a shipped-file hash manifest, and separate source-wheel hashes. The
+stable launcher loads them locally; hooks never self-install or download Python
+dependencies.
+
 Every release follows the [Plugin Release SOP](docs/PLUGIN_RELEASE_SOP.md):
 version increment, full acceptance gate, publish, marketplace refresh, full
 Codex restart, scoped cache cleanup, and post-install validation.

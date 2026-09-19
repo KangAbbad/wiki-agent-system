@@ -1,0 +1,9 @@
+Metadata-Version: 2.1
+Name: youtube-transcript-api
+Version: 1.2.4
+Summary: An API to fetch transcripts/subtitles for a given YouTube video
+License: MIT
+Home-page: https://github.com/jdepoix/youtube-transcript-api
+Project-URL: Repository, https://github.com/jdepoix/youtube-transcript-api
+Requires-Dist: defusedxml (>=0.7.1,<0.8.0)
+Requires-Dist: requests

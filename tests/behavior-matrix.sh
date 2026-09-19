@@ -101,8 +101,8 @@ test ! -d "$foreign/.wiki/inbox"
 # Coexistence shape: this plugin owns each lifecycle event once and does not
 # invoke, patch, or name the upstream wiki plugin in its hook configuration.
 hooks="$test_root/plugin/hooks/hooks.json"
-test "$(grep -o 'current/hooks/preflight.py' "$hooks" | wc -l | tr -d ' ')" -eq 3
-test "$(grep -o 'provision.py' "$hooks" | wc -l | tr -d ' ')" -eq 3
+test "$(grep -o 'current/hooks/preflight.py' "$hooks" | wc -l | tr -d ' ')" -eq 4
+test "$(grep -o 'provision.py' "$hooks" | wc -l | tr -d ' ')" -eq 4
 ! grep -q 'wiki@llm-wiki\|llm-wiki' "$hooks"
 
 echo 'behavior matrix passed'

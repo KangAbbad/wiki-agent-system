@@ -1,6 +1,6 @@
 {
   "name": "wiki-preflight",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Loads repository-scoped wiki knowledge before Codex work.",
   "author": {
     "name": "kangabbad"

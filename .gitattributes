@@ -1,0 +1,4 @@
+# Vendored upstream package artifacts are integrity-checked byte-for-byte.
+# Their packaging metadata and license texts intentionally preserve upstream
+# whitespace and reStructuredText heading markers.
+plugins/wiki-preflight/vendor/** -whitespace conflict-marker-size=80

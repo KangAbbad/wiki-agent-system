@@ -27,6 +27,7 @@ hooks_root=$(dirname "$plugin")
 installed_root=$(dirname "$hooks_root")
 launcher="$hooks_root/launcher.sh"
 test -x "$launcher" || fail "installed cache has no launcher"
+sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/vendor-runtime-import.sh" "$installed_root"
 python3 - "$installed_root/defaults/ambient.json" <<'PY'
 import json
 import sys
@@ -47,6 +48,9 @@ test ! -e "$installed_root" || fail "versioned marketplace cache was not removed
 stable_root="$data_root/current"
 stable_launcher="$stable_root/hooks/launcher.sh"
 stable_hook="$stable_root/hooks/preflight.py"
+sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/vendor-runtime-import.sh" "$stable_root"
+fallback_vendor="$root/fallback-vendor"
+mv "$stable_root/vendor" "$fallback_vendor"
 printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >"$root/start.json"
 "$stable_launcher" "$stable_root/scripts/evidence_verification.py" self-test >/dev/null
 printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"clean","turn_id":"one","prompt":"Research and synthesize the installed marketplace result"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >/dev/null
@@ -89,4 +93,5 @@ test ! -e "$retention_workspace/.wiki/.trash/state/old.json"
 test -f "$retention_workspace/.wiki/.trash/autosave/active.md"
 test -f "$retention_workspace/.wiki/raw/keep.md"
 test -f "$retention_workspace/.wiki/wiki/keep.md"
+mv "$fallback_vendor" "$stable_root/vendor"
 printf '%s\n' 'PASS: Git marketplace clean-device install'

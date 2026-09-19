@@ -219,6 +219,7 @@ def operational_files(wiki: Path, autosave_days: int, queue_days: int, state_day
     excluded = {state_path, lock_path, wiki / ".sessions" / "wiki-agent-system" / "capture.lock"}
     queue_root = wiki / ".sessions" / "wiki-agent-system" / "youtube-queues"
     receipt_root = wiki / ".sessions" / "wiki-agent-system" / RECEIPT_DIRNAME
+    foreground_root = wiki / ".sessions" / "wiki-agent-system" / "foreground-loops"
     queue_excluded = {
         path for path in queue_root.rglob("*") if path.is_file() and path.name.endswith(".lock")
     } if queue_root.is_dir() and not queue_root.is_symlink() else set()
@@ -227,10 +228,13 @@ def operational_files(wiki: Path, autosave_days: int, queue_days: int, state_day
         path for path in receipt_root.rglob("*") if path.is_file() and path.name.endswith(".lock")
     } if receipt_root.is_dir() and not receipt_root.is_symlink() else set()
     receipt_excluded.update(receipt_root / f"{receipt_id}.json" for receipt_id in receipt_ids)
+    foreground_excluded = {
+        path for path in foreground_root.rglob("*") if path.is_file() and path.name.endswith(".lock")
+    } if foreground_root.is_dir() and not foreground_root.is_symlink() else set()
     queue_files = files_older_than(queue_root, queue_days, queue_excluded)
     state_files = [
         path for path in files_older_than(wiki / ".sessions", state_days, excluded)
-        if not path.is_relative_to(queue_root) and not path.is_relative_to(receipt_root)
+        if not path.is_relative_to(queue_root) and not path.is_relative_to(receipt_root) and path not in foreground_excluded
     ]
     receipt_files = files_older_than(receipt_root, state_days, receipt_excluded)
     return {

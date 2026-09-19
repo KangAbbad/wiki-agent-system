@@ -2,11 +2,14 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-launcher="$root/plugins/wiki-preflight/hooks/launcher.sh"
-script="$root/plugins/wiki-preflight/scripts/youtube_fallback.py"
-hook="$root/plugins/wiki-preflight/hooks/preflight.py"
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
+test_plugin="$test_root/plugin"
+cp -R "$root/plugins/wiki-preflight" "$test_plugin"
+rm -r "$test_plugin/vendor"
+launcher="$test_plugin/hooks/launcher.sh"
+script="$test_plugin/scripts/youtube_fallback.py"
+hook="$test_plugin/hooks/preflight.py"
 
 "$launcher" "$script" self-test
 help=$({ "$launcher" "$script" --help; } 2>&1)
@@ -491,8 +494,9 @@ item["next_retry_at"] = 0
 path.write_text(json.dumps(data, sort_keys=True) + "\n")
 PY
 scheduled_log="$test_root/scheduled-fetches.log"
-printf '%s' "{\"cwd\":\"$scheduled_workspace\",\"hook_event_name\":\"SessionStart\"}" \
-  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$scheduled_log" "$launcher" "$hook" >/dev/null
+scheduled_second=$(printf '%s' "{\"cwd\":\"$scheduled_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"scheduled\",\"turn_id\":\"one\",\"prompt\":\"$scheduled_prompt\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$scheduled_log" "$launcher" "$hook")
+printf '%s' "$scheduled_second" | grep -q 'status=ok'
 python3 - "$scheduled_record" <<'PY'
 import json
 import sys
@@ -570,7 +574,7 @@ printf '%s\n' '# Workspace Wiki' >"$hook_workspace/.wiki/_index.md"
 historical_prompt='Tolong riset dan buat knowledge base berbahasa Indonesia dari empat video YouTube berikut: https://www.youtube.com/watch?v=S78sl3d8D1I https://www.youtube.com/watch?v=DEG-k0r9C2E https://www.youtube.com/watch?v=tGJTzahuapo https://www.youtube.com/watch?v=62qCljKilH8'
 hook_output=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"prompt\":\"$historical_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$hook_log" "$launcher" "$hook")
-printf '%s' "$hook_output" | grep -q 'YouTube automatic fallback preflight'
+printf '%s' "$hook_output" | grep -q 'YouTube foreground evidence loop'
 printf '%s' "$hook_output" | grep -q 'status=ok'
 printf '%s' "$hook_output" | grep -q 'caption_evidence=verified'
 printf '%s' "$hook_output" | grep -q 'receipt_id='
@@ -592,7 +596,78 @@ from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 assert data["schema_version"] == 3
 assert len(data["items"]) == 4
-assert all(item["status"] in {"ok", "no-captions", "retryable", "exhausted", "error", "blocked-install"} for item in data["items"])
+assert all(item["status"] in {"pending", "ok", "no-captions", "retryable", "exhausted", "error", "blocked", "blocked-install"} for item in data["items"])
+assert sum(item["status"] == "pending" for item in data["items"]) == 2
+assert all("session" not in json.dumps(item).lower() for item in data["items"])
+assert not any(key in json.dumps(data) for key in ("PLUGIN_ROOT", "PLUGIN_DATA"))
+PY
+test "$(wc -l <"$hook_log" | tr -d ' ')" -eq 2
+blocked_stop=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"last_assistant_message\":\"Still collecting video evidence\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+printf '%s' "$blocked_stop" | grep -q '"decision": "block"'
+continuation_output=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"prompt\":\"Foreground continuation\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$hook_log" "$launcher" "$hook")
+printf '%s' "$continuation_output" | grep -q 'state=evidence-ready'
+python3 - "$hook_workspace" "$queue_record" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+workspace, queue_path = map(Path, sys.argv[1:])
+wiki = workspace / ".wiki"
+data = json.loads(queue_path.read_text())
+records = data["items"]
+bindings = []
+receipt_ids = []
+hashes = []
+for item in records:
+    receipt = item["receipt"]
+    receipt_ids.append(receipt["receipt_id"])
+    for entry in receipt["files"]:
+        value = f"{receipt['receipt_id']}/{entry['sha256']}"
+        bindings.append(value)
+        hashes.append(entry["sha256"])
+body = "## Synthesis\n\nGrounded synthesis from the verified caption evidence.\n\n## Sources\n\n"
+body += "\n".join(
+    f"- {item['url']} receipt={item['receipt']['receipt_id']} hash={item['receipt']['files'][0]['sha256']}"
+    for item in records
+)
+body += "\n\n## Quality\n\nClaim-to-receipt mapping, provenance, and quality validation passed.\n"
+artifact = wiki / "wiki" / "youtube-knowledge.md"
+artifact_path = "wiki/youtube-knowledge.md"
+artifact.write_text("\n".join([
+    "---",
+    "type: youtube-knowledge",
+    "schema: 1",
+    "status: pending-curation",
+    f"queue_id: {data['queue_id']}",
+    f"artifact_path: {artifact_path}",
+    f"artifact_sha256: {hashlib.sha256(body.encode()).hexdigest()}",
+    f"receipt_ids: {';'.join(receipt_ids)}",
+    f"receipt_hashes: {';'.join(bindings)}",
+    f"source_urls: {';'.join(item['url'] for item in records)}",
+    f"claim_evidence: {';'.join(bindings)}",
+    "provenance_class: caption",
+    "evidence_status: verified",
+    "grounded: true",
+    "quality_status: verified",
+    "---",
+    body,
+]))
+PY
+final_stop=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"last_assistant_message\":\"Grounded knowledge artifact finalized from caption receipts\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+! printf '%s' "$final_stop" | grep -q '"decision": "block"'
+test "$(wc -l <"$hook_log" | tr -d ' ')" -eq 4
+find "$hook_workspace/.wiki/.sessions/wiki-agent-system/foreground-loops" -type f -name '*.json' -print \
+  | xargs -n1 grep -q '"state": "verified"'
+python3 - "$queue_record" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert all(item["status"] == "ok" for item in data["items"])
 assert all(item["attempt"] == 1 for item in data["items"])
 assert all(item["provenance_class"] == "caption" for item in data["items"])
 assert all(item["evidence_eligible"] is True for item in data["items"])
@@ -601,10 +676,129 @@ assert all(item["evidence_reason"] == "fresh-regular-vtt" for item in data["item
 assert all(item["attempts"] and item["attempts"][0]["route"] == "caption" for item in data["items"])
 assert all(item["receipt"]["provenance_class"] == "caption" for item in data["items"])
 assert all(len(item["receipt"]["files"]) == 1 for item in data["items"])
-assert all("session" not in json.dumps(item).lower() for item in data["items"])
 assert not any(key in json.dumps(data) for key in ("PLUGIN_ROOT", "PLUGIN_DATA"))
 PY
-test "$(wc -l <"$hook_log" | tr -d ' ')" -eq 4
+
+interrupt_workspace="$test_root/interrupt-workspace"
+mkdir -p "$interrupt_workspace/.wiki/raw" "$interrupt_workspace/.wiki/wiki" "$interrupt_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$interrupt_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$interrupt_workspace/.wiki/_index.md"
+interrupt_url='https://www.youtube.com/watch?v=dQw4w9WgXcQ'
+interrupt_initial=$(printf '%s' "{\"cwd\":\"$interrupt_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"interrupt\",\"turn_id\":\"one\",\"prompt\":\"Riset video $interrupt_url\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL=1 "$launcher" "$hook")
+printf '%s' "$interrupt_initial" | grep -q 'state=retryable'
+interrupt_queue=$(find "$interrupt_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
+interrupt_controller=$(find "$interrupt_workspace/.wiki/.sessions/wiki-agent-system/foreground-loops" -type f -name '*.json' -print)
+python3 - "$interrupt_queue" "$interrupt_controller" "$interrupt_workspace" <<'PY'
+import hashlib
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+queue_path, controller_path, workspace = map(Path, sys.argv[1:])
+data = json.loads(queue_path.read_text())
+item = data["items"][0]
+caption = workspace / ".wiki" / "inbox" / "youtube" / f"{item['video_id']}.vtt"
+caption.parent.mkdir(parents=True, exist_ok=True)
+caption.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\ninterrupted receipt\n")
+receipt = {
+    "schema_version": 1,
+    "receipt_id": "c" * 32,
+    "canonical_url": item["url"],
+    "video_id": item["video_id"],
+    "status": "ok",
+    "provenance_class": "caption",
+    "attempt": 1,
+    "attempted_at": datetime.now(timezone.utc).isoformat(),
+    "files": [{
+        "path": f"inbox/youtube/{caption.name}",
+        "sha256": hashlib.sha256(caption.read_bytes()).hexdigest(),
+    }],
+}
+receipt_dir = workspace / ".wiki" / ".sessions" / "wiki-agent-system" / "youtube-receipts"
+receipt_dir.mkdir(parents=True, exist_ok=True)
+(receipt_dir / f"{receipt['receipt_id']}.json").write_text(json.dumps(receipt) + "\n")
+item.update({
+    "status": "running",
+    "started_at": datetime.now(timezone.utc).isoformat(),
+    "terminal_at": None,
+    "lease_until": 4102444800,
+    "error_class": None,
+    "files": [caption.name],
+    "receipt": receipt,
+    "caption_state": "running",
+    "metadata_state": "absent",
+    "provenance_class": "none",
+    "evidence_eligible": False,
+    "transcript_eligible": False,
+    "evidence_reason": "not-attempted",
+})
+data["updated_at"] = datetime.now(timezone.utc).isoformat()
+queue_path.write_text(json.dumps(data, sort_keys=True) + "\n")
+controller = json.loads(controller_path.read_text())
+assert controller["state"] == "retryable"
+assert controller["action"] == "caption-retry"
+PY
+printf '%s' "{\"cwd\":\"$interrupt_workspace\",\"hook_event_name\":\"Interrupt\",\"session_id\":\"interrupt\",\"turn_id\":\"one\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook" >/dev/null
+python3 - "$interrupt_queue" "$interrupt_controller" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+queue = json.loads(Path(sys.argv[1]).read_text())
+item = queue["items"][0]
+assert item["status"] == "pending"
+assert item["error_class"] == "interrupted"
+assert item["lease_until"] is None
+controller = json.loads(Path(sys.argv[2]).read_text())
+assert controller["state"] == "retryable"
+assert "interrupted checkpoint preserved" in controller["reason"]
+PY
+interrupt_continuation=$(printf '%s' "{\"cwd\":\"$interrupt_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"interrupt\",\"turn_id\":\"one\",\"prompt\":\"Foreground continuation\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL=1 "$launcher" "$hook")
+printf '%s' "$interrupt_continuation" | grep -q 'state=evidence-ready'
+test ! -e "$test_root/interrupt-fetches.log"
+python3 - "$interrupt_queue" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text())
+item = data["items"][0]
+assert item["status"] == "ok"
+assert item["receipt"]["receipt_id"] == "c" * 32
+assert item["transcript_eligible"] is True
+PY
+test "$(find "$interrupt_workspace/.wiki/.sessions/wiki-agent-system/youtube-receipts" -type f -name '*.json' | wc -l | tr -d ' ')" -eq 1
+python3 - "$interrupt_workspace" "$interrupt_queue" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+workspace, queue_path = map(Path, sys.argv[1:])
+wiki = workspace / ".wiki"
+data = json.loads(queue_path.read_text())
+item = data["items"][0]
+receipt = item["receipt"]
+binding = f"{receipt['receipt_id']}/{receipt['files'][0]['sha256']}"
+body = f"## Synthesis\n\nGrounded interrupted-work recovery for {item['url']}.\n\n## Sources\n\n- {item['url']} receipt={receipt['receipt_id']} hash={receipt['files'][0]['sha256']}\n\n## Quality\n\nReceipt reuse and provenance validation passed.\n"
+artifact = wiki / "wiki" / "interrupt-knowledge.md"
+artifact.write_text("\n".join([
+    "---", "type: youtube-knowledge", "schema: 1", "status: pending-curation",
+    f"queue_id: {data['queue_id']}", "artifact_path: wiki/interrupt-knowledge.md",
+    f"artifact_sha256: {hashlib.sha256(body.encode()).hexdigest()}",
+    f"receipt_ids: {receipt['receipt_id']}", f"receipt_hashes: {binding}",
+    f"source_urls: {item['url']}", f"claim_evidence: {binding}",
+    "provenance_class: caption", "evidence_status: verified", "grounded: true",
+    "quality_status: verified", "---", body,
+]))
+PY
+interrupt_final_stop=$(printf '%s' "{\"cwd\":\"$interrupt_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"interrupt\",\"turn_id\":\"one\",\"last_assistant_message\":\"Grounded interrupted knowledge finalized\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+! printf '%s' "$interrupt_final_stop" | grep -q '"decision": "block"'
 
 race_url_one='https://www.youtube.com/watch?v=S78sl3d8D1I'
 race_url_two='https://www.youtube.com/watch?v=DEG-k0r9C2E'
@@ -618,7 +812,7 @@ slow_output=$(printf '%s' "{\"cwd\":\"$slow_workspace\",\"hook_event_name\":\"Us
 slow_elapsed=$(( $(date +%s) - slow_started ))
 test "$slow_elapsed" -lt 45
 printf '%s' "$slow_output" | grep -q 'status=retryable'
-printf '%s' "$slow_output" | grep -q 'terminal=0; pending=2'
+printf '%s' "$slow_output" | grep -q 'terminal=0; pending=3'
 slow_record=$(find "$slow_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$slow_record" <<'PY'
 import json
@@ -781,7 +975,7 @@ printf '%s\n' '# Workspace Wiki' >"$pending_workspace/.wiki/_index.md"
 pending_prompt='Riset lima video: https://www.youtube.com/watch?v=S78sl3d8D1I https://www.youtube.com/watch?v=DEG-k0r9C2E https://www.youtube.com/watch?v=tGJTzahuapo https://www.youtube.com/watch?v=62qCljKilH8 https://www.youtube.com/watch?v=dQw4w9WgXcQ'
 pending_output=$(printf '%s' "{\"cwd\":\"$pending_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"pending\",\"turn_id\":\"one\",\"prompt\":\"$pending_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$test_root/pending-fetches.log" "$launcher" "$hook")
-printf '%s' "$pending_output" | grep -q 'terminal=4; pending=1'
+printf '%s' "$pending_output" | grep -q 'terminal=2; pending=3'
 pending_record=$(find "$pending_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$pending_record" <<'PY'
 import json
@@ -789,8 +983,49 @@ import sys
 
 data = json.load(open(sys.argv[1]))
 assert len(data["items"]) == 5
-assert sum(item["status"] == "pending" for item in data["items"]) == 1
+assert sum(item["status"] == "pending" for item in data["items"]) == 3
 PY
+for continuation in one two; do
+  printf '%s' "{\"cwd\":\"$pending_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"pending\",\"turn_id\":\"one\",\"prompt\":\"Foreground continuation $continuation\"}" \
+    | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$test_root/pending-fetches.log" "$launcher" "$hook" >/dev/null
+done
+python3 - "$pending_record" <<'PY'
+import json
+import sys
+
+data = json.load(open(sys.argv[1]))
+assert all(item["status"] == "ok" for item in data["items"])
+PY
+python3 - "$pending_workspace" "$pending_record" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+workspace, queue_path = map(Path, sys.argv[1:])
+wiki = workspace / ".wiki"
+data = json.loads(queue_path.read_text())
+records = data["items"]
+bindings = [f"{item['receipt']['receipt_id']}/{item['receipt']['files'][0]['sha256']}" for item in records]
+body = "## Synthesis\n\nGrounded pending-queue synthesis.\n\n## Sources\n\n" + "\n".join(
+    f"- {item['url']} receipt={item['receipt']['receipt_id']} hash={item['receipt']['files'][0]['sha256']}"
+    for item in records
+) + "\n\n## Quality\n\nAll claims passed receipt-bound provenance validation.\n"
+artifact = wiki / "wiki" / "pending-knowledge.md"
+artifact.write_text("\n".join([
+    "---", "type: youtube-knowledge", "schema: 1", "status: pending-curation",
+    f"queue_id: {data['queue_id']}", "artifact_path: wiki/pending-knowledge.md",
+    f"artifact_sha256: {hashlib.sha256(body.encode()).hexdigest()}",
+    f"receipt_ids: {';'.join(item['receipt']['receipt_id'] for item in records)}",
+    f"receipt_hashes: {';'.join(bindings)}",
+    f"source_urls: {';'.join(item['url'] for item in records)}",
+    f"claim_evidence: {';'.join(bindings)}", "provenance_class: caption",
+    "evidence_status: verified", "grounded: true", "quality_status: verified", "---", body,
+]))
+PY
+pending_final_stop=$(printf '%s' "{\"cwd\":\"$pending_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"pending\",\"turn_id\":\"one\",\"last_assistant_message\":\"Grounded pending knowledge finalized\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+! printf '%s' "$pending_final_stop" | grep -q '"decision": "block"'
 
 retention_workspace="$test_root/retention-workspace"
 mkdir -p "$retention_workspace/.wiki/raw" "$retention_workspace/.wiki/wiki" "$retention_workspace/.wiki/inbox"
@@ -811,7 +1046,7 @@ policy="$root/plugins/wiki-preflight/defaults/policy.md"
 ambient="$root/plugins/wiki-preflight/skills/wiki-ambient/SKILL.md"
 workspace_skill="$root/plugins/wiki-preflight/skills/wiki-workspace/SKILL.md"
 grep -Fq '`UserPromptSubmit` owns ordinary YouTube ingestion' "$policy"
-grep -Fq 'automatic queue drain' "$policy"
+grep -Fq 'durable foreground controller' "$policy"
 for document in "$policy" "$ambient" "$workspace_skill"; do
   ! grep -Fq '$PLUGIN_ROOT' "$document"
   ! grep -Fq '$PLUGIN_DATA' "$document"

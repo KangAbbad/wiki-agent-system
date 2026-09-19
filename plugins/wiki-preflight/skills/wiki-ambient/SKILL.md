@@ -50,8 +50,9 @@ and a valid `canonical_uri` in Workspace Wiki, then User Wiki, then Mnemosyne
 hints. Mnemosyne hints are non-authoritative.
 
 For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
-ingestion and the agent automatically drains any remaining queue entries during
-the same task. No user-side command or repeated prompt is required.
+ingestion. A durable foreground controller continues pending queue entries via
+the official Stop continuation while the task is active. No user-side command,
+repeated prompt, daemon, or scheduler is required.
 
 Use a caption as transcript evidence only when hook context reports
 `caption_evidence=verified` together with a `receipt_id`, `caption_sha256`, and
@@ -60,9 +61,28 @@ receipt-bound file list. Stale or unreceipted captions, `metadata-only`, and
 receipt ID for the canonicalization gate rather than inferring freshness from a
 path or timestamp.
 
-When context reports `retry-scheduled`, recovery is automatic on a later
-`SessionStart`; do not ask the user to repeat the prompt. It remains ineligible
-for transcript claims until a verified receipt is available.
+The bundled caption helper may use the vendored
+`youtube-transcript-api==1.2.4` adapter and its pinned pure-Python dependencies
+from the stable plugin runtime. It must list tracks before fetching,
+prefer the requested language's manual track over its generated track, and
+record track metadata, adapter version, translation origin, and normalized
+hash in the receipt. A missing/mismatched adapter falls back to `yt-dlp`;
+runtime installation, proxy, cookie, login, or paid-provider work is forbidden.
+Translated tracks are reading aids only and are never transcript-eligible.
+
+When context reports `retry-scheduled`, recovery is automatic through the active
+foreground continuation; do not ask the user to repeat the prompt. The
+continuation respects `next_retry_at` and never bypasses its backoff. It remains
+ineligible for transcript claims until a verified receipt is available.
+
+Receipt verification is only `evidence-ready`. Before declaring the knowledge
+task complete, write one receipt-bound `youtube-knowledge` artifact in the
+workspace Wiki `wiki/` area. Bind its artifact hash, queue/source URLs, receipt
+IDs, every caption hash, and claim-to-evidence references; mark
+`provenance_class=caption`, `evidence_status=verified`, `grounded=true`, and
+`quality_status=verified`. Include `## Synthesis`, `## Sources`, and `## Quality`
+sections, with the receipt IDs, hashes, and source URLs in the grounded
+synthesis. Missing or duplicate artifacts keep Stop blocked.
 
 Report each acquired source with its provenance class (`caption`,
 `web-extraction`, `metadata`, `machine-transcription`, or `none`), evidence

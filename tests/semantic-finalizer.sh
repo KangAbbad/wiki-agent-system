@@ -186,4 +186,95 @@ gap_capture=$(find "$public_gap/.wiki/inbox/autosave" -type f -name 'session-*.m
 grep -Fq 'unverified' "$gap_capture"
 grep -Fq 'agent-owned' "$gap_capture"
 
+foreground="$test_root/foreground"
+mkdir "$foreground"
+foreground_hook="$plugin_root/hooks/preflight.py"
+python3 - "$foreground_hook" "$foreground/.wiki" <<'PY'
+import hashlib
+import contextlib
+import importlib.util
+import io
+import json
+import sys
+import time
+from pathlib import Path
+
+hook, wiki = map(Path, sys.argv[1:])
+wiki.mkdir(parents=True)
+(wiki / "raw").mkdir()
+(wiki / "wiki").mkdir()
+(wiki / "config.md").write_text("# Workspace Wiki\n")
+(wiki / "_index.md").write_text("# Workspace Wiki\n")
+spec = importlib.util.spec_from_file_location("preflight", hook)
+module = importlib.util.module_from_spec(spec)
+sys.stdin = io.StringIO(json.dumps({"cwd": str(wiki.parent), "hook_event_name": "SessionStart"}))
+with contextlib.redirect_stdout(io.StringIO()):
+    spec.loader.exec_module(module)
+
+queue_id = module.queue_id_for("controller-session", "controller-turn")
+module.foreground_controller_directory(wiki)
+path, _ = module.foreground_controller_paths(wiki, queue_id)
+now = time.time()
+module.atomic_queue_write(path, {
+    "schema_version": 0,
+    "queue_id": queue_id,
+    "state": "pending",
+    "action": "caption-attempt",
+    "loop_count": 0,
+    "deadline_at": now + 40,
+    "revision": 0,
+    "reason": "caption evidence pending",
+    "created_at": now,
+    "updated_at": now,
+})
+status, state, error = module.ensure_foreground_controller(wiki, queue_id)
+assert status == "migrated", (status, error)
+assert state["schema_version"] == 1
+assert "prompt" not in json.dumps(state)
+
+gate = module.stop_foreground_gate(wiki, {
+    "session_id": "controller-session",
+    "turn_id": "controller-turn",
+    "last_assistant_message": "still working",
+})
+assert gate["block"] is True
+assert queue_id in gate["reason"]
+assert "controller-session" not in gate["reason"]
+
+status, state, error = module.update_foreground_controller(
+    wiki, queue_id, state["revision"], state="exhausted",
+    action="terminal-caption-result", reason="caption queue exhausted",
+)
+assert status == "updated", (status, error)
+report = {
+    "session_id": "controller-session",
+    "turn_id": "controller-turn",
+    "last_assistant_message": "still finalizing",
+}
+assert module.stop_foreground_gate(wiki, report)["block"] is True
+report["last_assistant_message"] = "status: exhausted; provenance: metadata; transcript: not-available"
+assert module.stop_foreground_gate(wiki, report)["capture"] is True
+
+future_id = module.queue_id_for("future-controller", "turn")
+future_path, _ = module.foreground_controller_paths(wiki, future_id)
+future = module.new_foreground_controller(future_id)
+future["schema_version"] = 99
+module.atomic_queue_write(future_path, future)
+before = hashlib.sha256(future_path.read_bytes()).hexdigest()
+assert module.ensure_foreground_controller(wiki, future_id)[0] == "future-schema"
+assert hashlib.sha256(future_path.read_bytes()).hexdigest() == before
+future_gate = module.stop_foreground_gate(wiki, {"session_id": "future-controller", "turn_id": "turn"})
+assert future_gate["capture"] is False
+
+expired_id = module.queue_id_for("expired-controller", "turn")
+expired_path, _ = module.foreground_controller_paths(wiki, expired_id)
+expired = module.new_foreground_controller(expired_id)
+expired["deadline_at"] = 0
+module.atomic_queue_write(expired_path, expired)
+module.advance_foreground_controller(
+    wiki, wiki.parent, "", {"session_id": "expired-controller", "turn_id": "turn"},
+)
+assert module.read_foreground_controller(wiki, expired_id)[1]["state"] == "exhausted"
+PY
+
 echo 'semantic finalizer contract passed'

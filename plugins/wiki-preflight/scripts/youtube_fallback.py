@@ -3,6 +3,8 @@
 
 import argparse
 import hashlib
+import importlib
+from importlib import metadata as importlib_metadata
 import json
 import math
 import os
@@ -44,22 +46,24 @@ QUEUE_LEGACY_SCHEMA_VERSION = 1
 QUEUE_PREVIOUS_SCHEMA_VERSION = 2
 QUEUE_DIRNAME = "youtube-queues"
 RECEIPT_SCHEMA_VERSION = 1
+ADAPTER_RECEIPT_SCHEMA_VERSION = 2
+TRANSCRIPT_API_VERSION = "1.2.4"
 RECEIPT_DIRNAME = "youtube-receipts"
 QUEUE_ID = re.compile(r"^[0-9a-f]{32}$")
 RECEIPT_ID = re.compile(r"^[0-9a-f]{32}$")
-QUEUE_STATES = frozenset({"pending", "running", "retryable", "ok", "no-captions", "exhausted", "error", "blocked-install"})
-QUEUE_TERMINAL_STATES = frozenset({"ok", "no-captions", "exhausted", "error", "blocked-install"})
+QUEUE_STATES = frozenset({"pending", "running", "retryable", "ok", "no-captions", "exhausted", "error", "blocked", "blocked-install"})
+QUEUE_TERMINAL_STATES = frozenset({"ok", "no-captions", "exhausted", "error", "blocked", "blocked-install"})
 QUEUE_RETRYABLE_STATES = frozenset({"pending", "retryable"})
 QUEUE_AUTOMATIC_RETRY_CAP = 3
 QUEUE_RETRY_BASE_SECONDS = 5
 QUEUE_RETRY_MAX_SECONDS = 60
-RETRYABLE_CAPTION_ERRORS = frozenset({"network", "timeout", "process-failed", "deadline-exhausted", "caption-lock", "caption-fetch-failed", "invalid-helper-output"})
+RETRYABLE_CAPTION_ERRORS = frozenset({"network", "timeout", "process-failed", "deadline-exhausted", "caption-lock", "caption-fetch-failed", "invalid-helper-output", "transcript-api-parser"})
 QUEUE_LOCK_TIMEOUT = 0.5
 DRAIN_DEFAULT_DEADLINE = 20
 DRAIN_DEFAULT_CONCURRENCY = 1
 DRAIN_DEFAULT_LIMIT = 2
 DRAIN_PER_URL_TIMEOUT = 12
-RESULT_STATUSES = frozenset({"ok", "no-captions", "stale-captions-ignored", "metadata-only", "error", "blocked-install", "install-approval-required", "installer-failed"})
+RESULT_STATUSES = frozenset({"ok", "no-captions", "stale-captions-ignored", "metadata-only", "error", "blocked", "blocked-install", "install-approval-required", "installer-failed"})
 RESULT_STATUSES = RESULT_STATUSES | frozenset({"machine-transcription", "machine-transcription-existing"})
 PROVENANCE_CLASSES = frozenset({"caption", "web-extraction", "metadata", "machine-transcription", "none"})
 TRANSCRIPTION_LANGUAGE = re.compile(r"^(?:auto|[A-Za-z]{2,10})$")
@@ -94,7 +98,7 @@ def safe_attempts(attempts):
             continue
         entry = {}
         route = item.get("route")
-        if route in {"caption", "metadata", "audio", "transcription"}:
+        if route in {"caption", "transcript-api", "metadata", "audio", "transcription"}:
             entry["route"] = route
         attempt = item.get("attempt")
         if type(attempt) is int and 1 <= attempt <= 4:
@@ -202,7 +206,24 @@ def validate_caption_receipt(data, *, wiki=None, expected_url=None, expected_vid
         "attempted_at",
         "files",
     }
-    if not isinstance(data, dict) or set(data) != fields or data.get("schema_version") != RECEIPT_SCHEMA_VERSION:
+    if not isinstance(data, dict):
+        raise ValueError("caption receipt schema is invalid")
+    version = data.get("schema_version")
+    adapter_fields = {
+        "adapter",
+        "adapter_version",
+        "track_language_code",
+        "track_language",
+        "track_is_generated",
+        "track_is_translatable",
+        "translated_from",
+        "normalized_sha256",
+    }
+    if version == RECEIPT_SCHEMA_VERSION and set(data) != fields:
+        raise ValueError("caption receipt schema is invalid")
+    if version == ADAPTER_RECEIPT_SCHEMA_VERSION and set(data) != fields | adapter_fields:
+        raise ValueError("caption receipt schema is invalid")
+    if version not in {RECEIPT_SCHEMA_VERSION, ADAPTER_RECEIPT_SCHEMA_VERSION}:
         raise ValueError("caption receipt schema is invalid")
     if not isinstance(data.get("receipt_id"), str) or not RECEIPT_ID.fullmatch(data["receipt_id"]):
         raise ValueError("caption receipt id is invalid")
@@ -229,6 +250,22 @@ def validate_caption_receipt(data, *, wiki=None, expected_url=None, expected_vid
         raise ValueError("caption receipt timestamp is invalid") from error
     if parsed.tzinfo is None:
         raise ValueError("caption receipt timestamp must include a timezone")
+    if version == ADAPTER_RECEIPT_SCHEMA_VERSION:
+        if data.get("adapter") != "youtube-transcript-api":
+            raise ValueError("caption receipt adapter is invalid")
+        if not isinstance(data.get("adapter_version"), str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", data["adapter_version"]):
+            raise ValueError("caption receipt adapter version is invalid")
+        if not isinstance(data.get("track_language_code"), str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", data["track_language_code"]):
+            raise ValueError("caption receipt track language is invalid")
+        if not isinstance(data.get("track_language"), str) or not 1 <= len(data["track_language"]) <= 120 or "\n" in data["track_language"] or "\r" in data["track_language"]:
+            raise ValueError("caption receipt track name is invalid")
+        if type(data.get("track_is_generated")) is not bool or type(data.get("track_is_translatable")) is not bool:
+            raise ValueError("caption receipt track flags are invalid")
+        translated_from = data.get("translated_from")
+        if translated_from is not None and (not isinstance(translated_from, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", translated_from)):
+            raise ValueError("caption receipt translation source is invalid")
+        if not isinstance(data.get("normalized_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", data["normalized_sha256"]):
+            raise ValueError("caption receipt normalized hash is invalid")
     files = data.get("files")
     if not isinstance(files, list) or not 1 <= len(files) <= 20:
         raise ValueError("caption receipt files are invalid")
@@ -278,6 +315,8 @@ def result_contract(
     transcription=None,
     evidence_reason=None,
     receipt=None,
+    evidence_eligible=None,
+    transcript_eligible=None,
 ):
     if status not in RESULT_STATUSES:
         raise ValueError("unsupported helper result status")
@@ -302,6 +341,7 @@ def result_contract(
         "stale-captions-ignored": "stale-caption-ignored",
         "metadata-only": "metadata-only-not-transcript",
         "error": "caption-route-failed",
+        "blocked": "access-boundary",
         "blocked-install": "installer-approval-required",
         "install-approval-required": "installer-approval-required",
         "installer-failed": "installer-failed",
@@ -313,8 +353,8 @@ def result_contract(
         "video_id": video_id,
         "url": url,
         "provenance_class": provenance_class,
-        "evidence_eligible": status in {"ok", "metadata-only"},
-        "transcript_eligible": status == "ok",
+        "evidence_eligible": status in {"ok", "metadata-only"} if evidence_eligible is None else evidence_eligible,
+        "transcript_eligible": status == "ok" if transcript_eligible is None else transcript_eligible,
         "evidence_reason": safe_text(str(reason), 120),
         "files": safe_file_names(files),
         "existing_files_ignored": safe_file_names(existing_files_ignored),
@@ -533,13 +573,14 @@ def queue_item_contract_defaults(item, wiki=None):
         metadata_state = "acquired" if isinstance(item.get("metadata"), dict) else "absent"
     provenance_class = "caption" if caption_valid else "metadata" if metadata_state == "acquired" else "none"
     evidence_eligible = caption_valid or metadata_state == "acquired"
-    transcript_eligible = caption_valid
+    transcript_eligible = caption_valid and not bool(receipt and receipt.get("translated_from"))
     caption_state = item.get("caption_state")
     if caption_state not in {"pending", "running", "retryable", "verified", "no-captions", "exhausted", "blocked"}:
         caption_state = {
             "ok": "verified",
             "no-captions": "no-captions",
             "exhausted": "exhausted",
+            "blocked": "blocked",
             "blocked-install": "blocked",
         }.get(status, "pending")
     reason = {
@@ -549,6 +590,7 @@ def queue_item_contract_defaults(item, wiki=None):
         "retryable": "caption-retry-scheduled",
         "exhausted": "caption-retries-exhausted",
         "error": "caption-route-failed",
+        "blocked": "access-boundary",
         "blocked-install": "installer-approval-required",
     }.get(status, "not-attempted")
     defaults = {
@@ -593,7 +635,7 @@ def valid_attempts(value):
     for attempt in value:
         if not isinstance(attempt, dict) or set(attempt) - allowed:
             return False
-        if attempt.get("route") not in {"caption", "metadata", "audio", "transcription"}:
+        if attempt.get("route") not in {"caption", "transcript-api", "metadata", "audio", "transcription"}:
             return False
         if type(attempt.get("attempt")) is not int or not 1 <= attempt["attempt"] <= 4:
             return False
@@ -705,7 +747,10 @@ def validate_queue(data, queue_id, schema_version=None):
                 return "invalid", "queue item provenance is invalid"
             if type(item["evidence_eligible"]) is not bool or type(item["transcript_eligible"]) is not bool:
                 return "invalid", "queue item evidence eligibility is invalid"
-            if item["evidence_eligible"] != (caption_bound or item.get("metadata_state") == "acquired" or (expected_version < QUEUE_SCHEMA_VERSION and item["status"] == "metadata-only")) or item["transcript_eligible"] != caption_bound:
+            translated = bool(receipt and receipt.get("translated_from"))
+            expected_evidence = caption_bound or item.get("metadata_state") == "acquired" or (expected_version < QUEUE_SCHEMA_VERSION and item["status"] == "metadata-only")
+            expected_transcript = caption_bound and not translated
+            if item["evidence_eligible"] != expected_evidence or item["transcript_eligible"] != expected_transcript:
                 return "invalid", "queue item evidence eligibility is inconsistent"
             if not isinstance(item["evidence_reason"], str) or not 1 <= len(item["evidence_reason"]) <= 120 or "\n" in item["evidence_reason"] or "\r" in item["evidence_reason"]:
                 return "invalid", "queue item evidence reason is invalid"
@@ -719,6 +764,7 @@ def validate_queue(data, queue_id, schema_version=None):
                 "exhausted": "exhausted",
                 "ok": "verified",
                 "no-captions": "no-captions",
+                "blocked": "blocked",
             }
             expected_caption_state = state_pairs.get(item["status"])
             if expected_caption_state and item["caption_state"] != expected_caption_state:
@@ -938,7 +984,12 @@ def claim_queue_items(wiki, queue_id, limit, lease_seconds):
             item["started_at"] = stamp
             item["updated_at"] = stamp
             item["lease_until"] = now + lease_seconds
-            claims.append({"url": item["url"], "video_id": item["video_id"], "attempt": item["attempt"]})
+            claims.append({
+                "url": item["url"],
+                "video_id": item["video_id"],
+                "attempt": item["attempt"],
+                "resume": item.get("error_class") == "interrupted",
+            })
             changed = True
         if changed:
             data["updated_at"] = stamp
@@ -1017,7 +1068,48 @@ def fetch_metadata(command, url, timeout):
     return metadata, attempt
 
 
+def existing_caption_receipt(wiki, claim):
+    """Reuse a receipt left behind if interruption happened after acquisition."""
+    if claim.get("resume") is not True:
+        return None
+    try:
+        candidates = sorted(receipt_directory(wiki).glob("*.json"))[-100:]
+    except OSError:
+        return None
+    for path in candidates:
+        if path.is_symlink() or not RECEIPT_ID.fullmatch(path.stem):
+            continue
+        try:
+            return read_caption_receipt(
+                wiki,
+                path.stem,
+                expected_url=claim["url"],
+                expected_video_id=claim["video_id"],
+                verify_files=True,
+            )
+        except (OSError, TypeError, ValueError):
+            continue
+    return None
+
+
 def run_queue_item(claim, workspace, wiki, deadline):
+    existing = existing_caption_receipt(wiki, claim)
+    if existing:
+        return {
+            "state": "ok",
+            "helper_status": "receipt-reused",
+            "error_class": None,
+            "files": [PurePosixPath(entry["path"]).name for entry in existing["files"]],
+            "provenance_class": "caption",
+            "evidence_eligible": True,
+            "transcript_eligible": True,
+            "evidence_reason": "fresh-regular-vtt",
+            "attempts": [],
+            "metadata": None,
+            "receipt": existing,
+            "retryable": False,
+            "caption_state": "verified",
+        }
     remaining = deadline - time.monotonic()
     if remaining <= TIMEOUT_MIN:
         return {"defer": True, "error_class": "drain-deadline"}
@@ -1066,6 +1158,7 @@ def run_queue_item(claim, workspace, wiki, deadline):
         "no-captions": "no-captions",
         "stale-captions-ignored": "no-captions",
         "metadata-only": "metadata-only",
+        "blocked": "blocked",
         "install-approval-required": "blocked-install",
     }.get(helper_status, "error")
     error_class = data.get("error_class")
@@ -1111,7 +1204,7 @@ def run_queue_item(claim, workspace, wiki, deadline):
         "metadata": contract["metadata"],
         "receipt": contract["receipt"],
         "retryable": state == "retryable" or (state == "error" and error_class in RETRYABLE_CAPTION_ERRORS),
-        "caption_state": "verified" if state == "ok" else "no-captions" if state == "no-captions" else "retryable" if state == "retryable" else "exhausted",
+        "caption_state": "verified" if state == "ok" else "no-captions" if state == "no-captions" else "blocked" if state == "blocked" else "retryable" if state == "retryable" else "exhausted",
     }
 
 
@@ -1133,7 +1226,7 @@ def finish_queue_claim(wiki, queue_id, claim, outcome):
             item["error_class"] = safe_text(str(outcome.get("error_class") or "deferred"), 80)
             item["next_retry_at"] = None
         else:
-            state = outcome["state"] if outcome["state"] in {"ok", "no-captions", "retryable", "exhausted", "error", "blocked-install"} else "error"
+            state = outcome["state"] if outcome["state"] in {"ok", "no-captions", "retryable", "exhausted", "error", "blocked", "blocked-install"} else "error"
             if outcome.get("retryable"):
                 if item["retry_count"] < QUEUE_AUTOMATIC_RETRY_CAP:
                     item["retry_count"] += 1
@@ -1166,7 +1259,7 @@ def finish_queue_claim(wiki, queue_id, claim, outcome):
                 item["metadata"] = None
                 item["metadata_state"] = "absent"
             item["receipt"] = outcome.get("receipt")
-            item["caption_state"] = "verified" if item["status"] == "ok" else "no-captions" if item["status"] == "no-captions" else "exhausted" if item["status"] == "exhausted" else "retryable" if item["status"] == "retryable" else outcome.get("caption_state", "blocked")
+            item["caption_state"] = "verified" if item["status"] == "ok" else "no-captions" if item["status"] == "no-captions" else "exhausted" if item["status"] == "exhausted" else "retryable" if item["status"] == "retryable" else "blocked" if item["status"] == "blocked" else outcome.get("caption_state", "blocked")
             item["lease_until"] = None
         item["updated_at"] = stamp
         if outcome.get("defer"):
@@ -1178,7 +1271,13 @@ def finish_queue_claim(wiki, queue_id, claim, outcome):
         release_file_lock(fd)
 
 
-def drain_queue(workspace, queue_id, deadline_seconds=DRAIN_DEFAULT_DEADLINE, concurrency=DRAIN_DEFAULT_CONCURRENCY, limit=DRAIN_DEFAULT_LIMIT):
+def drain_queue(
+    workspace,
+    queue_id,
+    deadline_seconds=DRAIN_DEFAULT_DEADLINE,
+    concurrency=DRAIN_DEFAULT_CONCURRENCY,
+    limit=DRAIN_DEFAULT_LIMIT,
+):
     if type(deadline_seconds) not in (int, float) or not math.isfinite(deadline_seconds) or not 1 <= deadline_seconds <= TIMEOUT_MAX:
         raise QueueError("--deadline must be between 1 and 600 seconds")
     if type(concurrency) is not int or not 1 <= concurrency <= 4:
@@ -1194,7 +1293,12 @@ def drain_queue(workspace, queue_id, deadline_seconds=DRAIN_DEFAULT_DEADLINE, co
         if remaining < TIMEOUT_MIN:
             break
         batch_limit = 1 if limit is None else min(1, limit - processed)
-        claimed = claim_queue_items(wiki, queue_id, batch_limit, max(DRAIN_PER_URL_TIMEOUT + 5, deadline_seconds + 1))
+        claimed = claim_queue_items(
+            wiki,
+            queue_id,
+            batch_limit,
+            max(DRAIN_PER_URL_TIMEOUT + 5, deadline_seconds + 1),
+        )
         if claimed["status"] != "ok" or not claimed["claims"]:
             break
         deferred = False
@@ -1212,6 +1316,42 @@ def drain_queue(workspace, queue_id, deadline_seconds=DRAIN_DEFAULT_DEADLINE, co
     result["processed"] = processed
     result["deadline_seconds"] = deadline_seconds
     return result
+
+
+def recover_queue_leases(workspace, queue_id):
+    """Return interrupted claims to pending without changing evidence state."""
+    wiki = queue_wiki(workspace)
+    path, lock_path = queue_paths(wiki, queue_id)
+    status, data, error = read_queue(path, queue_id)
+    if status not in {"valid", "legacy-schema"}:
+        return {"status": status, "queue_id": queue_id, "error": error, "recovered": 0}
+    fd, reason = acquire_file_lock(lock_path)
+    if fd is None:
+        return {"status": "unavailable", "queue_id": queue_id, "error": reason, "recovered": 0}
+    try:
+        status, data, error = read_queue(path, queue_id)
+        if status == "legacy-schema":
+            data = migrate_queue(data, queue_id)
+            status = "valid"
+        if status != "valid":
+            return {"status": status, "queue_id": queue_id, "error": error, "recovered": 0}
+        stamp = datetime.now(timezone.utc).isoformat()
+        recovered = 0
+        for item in data["items"]:
+            if item["status"] != "running":
+                continue
+            item["status"] = "pending"
+            item["caption_state"] = "pending"
+            item["lease_until"] = None
+            item["error_class"] = "interrupted"
+            item["updated_at"] = stamp
+            recovered += 1
+        if recovered:
+            data["updated_at"] = stamp
+            atomic_queue_write(path, data)
+        return {"status": "ok", "queue_id": queue_id, "recovered": recovered}
+    finally:
+        release_file_lock(fd)
 
 
 def drain_due_queues(workspace, deadline_seconds=8, limit=2):
@@ -1509,9 +1649,266 @@ def remove_caption_files(paths, output_dir):
     return failures
 
 
+def _transcript_api_module():
+    try:
+        return importlib.import_module("youtube_transcript_api")
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
+def _transcript_api_version(module):
+    value = getattr(module, "__version__", None)
+    if value:
+        return str(value)
+    try:
+        return importlib_metadata.version("youtube-transcript-api")
+    except importlib_metadata.PackageNotFoundError:
+        return ""
+
+
+def _track_value(track, name, default=None):
+    if isinstance(track, dict):
+        return track.get(name, default)
+    return getattr(track, name, default)
+
+
+def _language_rank(code, languages):
+    for index, pattern in enumerate(languages.split(",")):
+        if pattern.endswith(".*") and code.startswith(pattern[:-2]):
+            return index
+        if pattern == code:
+            return index
+    return None
+
+
+def select_transcript_track(transcript_list, languages, allow_translation=False):
+    tracks = list(transcript_list)
+    candidates = []
+    for track in tracks:
+        code = str(_track_value(track, "language_code", ""))
+        rank = _language_rank(code, languages)
+        if rank is not None:
+            candidates.append((rank, bool(_track_value(track, "is_generated", False)), track, None))
+    if candidates:
+        _, _, track, translated_from = min(candidates, key=lambda value: (value[0], value[1], str(_track_value(value[2], "language_code", ""))))
+        return track, translated_from
+    if not allow_translation:
+        return None, None
+    targets = [pattern[:-2] if pattern.endswith(".*") else pattern for pattern in languages.split(",")]
+    for target in targets:
+        for track in tracks:
+            if not _track_value(track, "is_translatable", False):
+                continue
+            available = _track_value(track, "translation_languages", []) or []
+            codes = {str(_track_value(language, "language_code", "")) for language in available}
+            if target in codes:
+                try:
+                    return track.translate(target), str(_track_value(track, "language_code", ""))
+                except Exception:
+                    return None, None
+    return None, None
+
+
+def _snippet_value(snippet, name, default=None):
+    if isinstance(snippet, dict):
+        return snippet.get(name, default)
+    return getattr(snippet, name, default)
+
+
+def _vtt_timestamp(seconds):
+    if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0 or seconds > 86400:
+        raise ValueError("transcript-api timestamp is invalid")
+    milliseconds = int(round(seconds * 1000))
+    hours, remainder = divmod(milliseconds, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    seconds, milliseconds = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+
+def normalize_transcript_snippets(fetched):
+    if hasattr(fetched, "to_raw_data"):
+        snippets = fetched.to_raw_data()
+    else:
+        snippets = list(fetched)
+    if not isinstance(snippets, list) or not 1 <= len(snippets) <= 20000:
+        raise ValueError("transcript-api returned no bounded snippets")
+    blocks = []
+    for index, snippet in enumerate(snippets, 1):
+        text = _snippet_value(snippet, "text")
+        start = _snippet_value(snippet, "start")
+        duration = _snippet_value(snippet, "duration", 0.001)
+        if not isinstance(text, str) or not text.strip():
+            continue
+        if type(duration) not in (int, float) or not math.isfinite(duration) or duration < 0:
+            raise ValueError("transcript-api snippet duration is invalid")
+        start_timestamp = _vtt_timestamp(start)
+        end_timestamp = _vtt_timestamp(float(start) + max(float(duration), 0.001))
+        clean_text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        blocks.append(f"{index}\n{start_timestamp} --> {end_timestamp}\n{clean_text}")
+    if not blocks:
+        raise ValueError("transcript-api returned empty snippets")
+    return "WEBVTT\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def atomic_caption_write(path, content):
+    path = Path(path)
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError("transcript-api output path is a symlink")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".transcript-api-", text=True)
+    try:
+        with os.fdopen(fd, "w") as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def transcript_api_error_class(error):
+    name = type(error).__name__
+    if name in {"NoTranscriptFound", "TranscriptsDisabled"}:
+        return "caption-track-absent"
+    if name in {"RequestBlocked", "IpBlocked", "PoTokenRequired", "VideoUnavailable", "VideoUnplayable", "AgeRestricted"}:
+        return "access-boundary"
+    if name in {"TimeoutError", "ConnectTimeout", "ReadTimeout", "ConnectionError", "YouTubeRequestFailed"}:
+        return "network"
+    return "transcript-api-parser"
+
+
+def transcript_api_exit_code(result):
+    return 0 if result.get("status") in {"ok", "no-captions"} else 1
+
+
+def fetch_transcript_api(args):
+    video_id, url = canonical_video(args.url)
+    validate_options(args)
+    output_dir = Path(args.output_dir or default_output_dir()).expanduser().resolve()
+    validate_output_scope(output_dir)
+    module = _transcript_api_module()
+    if module is None:
+        return result_contract(
+            "error",
+            video_id,
+            url,
+            attempts=[{"route": "transcript-api", "attempt": 1, "error_class": "dependency-unavailable"}],
+            error_class="dependency-unavailable",
+            error=f"youtube-transcript-api=={TRANSCRIPT_API_VERSION} is not provisioned",
+        )
+    adapter_version = _transcript_api_version(module)
+    if adapter_version != TRANSCRIPT_API_VERSION:
+        return result_contract(
+            "error",
+            video_id,
+            url,
+            attempts=[{"route": "transcript-api", "attempt": 1, "error_class": "dependency-version"}],
+            error_class="dependency-version",
+            error=f"youtube-transcript-api=={TRANSCRIPT_API_VERSION} is required",
+        )
+    try:
+        output_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        workspace_wiki = nearest_wiki(Path.cwd())
+        if not workspace_wiki or not valid_wiki(workspace_wiki):
+            raise ValueError("caption receipts require a valid local LLM Wiki")
+        api = module.YouTubeTranscriptApi()
+        transcript_list = api.list(video_id)
+        track, translated_from = select_transcript_track(transcript_list, args.languages, args.allow_translation)
+        attempt = {"route": "transcript-api", "attempt": 1}
+        if track is None:
+            attempt["error_class"] = "caption-track-absent"
+            return result_contract("no-captions", video_id, url, attempts=[attempt])
+        fetched = track.fetch()
+        content = normalize_transcript_snippets(fetched)
+        language_code = str(_track_value(track, "language_code", ""))
+        language = str(_track_value(track, "language", language_code))
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", language_code):
+            raise ValueError("transcript-api track language is invalid")
+        output = output_dir / f"{video_id}.{language_code}.transcript-api.vtt"
+        if output.exists() or output.is_symlink():
+            return result_contract(
+                "stale-captions-ignored",
+                video_id,
+                url,
+                attempts=[{"route": "transcript-api", "attempt": 1, "error_class": "existing-output"}],
+                existing_files_ignored=[output],
+            )
+        with caption_lock(workspace_wiki, url, TIMEOUT_MIN):
+            if output.exists() or output.is_symlink():
+                return result_contract(
+                    "stale-captions-ignored",
+                    video_id,
+                    url,
+                    attempts=[{"route": "transcript-api", "attempt": 1, "error_class": "existing-output"}],
+                    existing_files_ignored=[output],
+                )
+            atomic_caption_write(output, content)
+            normalized_hash = sha256_file(output)
+            metadata = {
+                "adapter": "youtube-transcript-api",
+                "adapter_version": adapter_version,
+                "track_language_code": language_code,
+                "track_language": language,
+                "track_is_generated": bool(_track_value(track, "is_generated", False)),
+                "track_is_translatable": bool(_track_value(track, "is_translatable", False)),
+                "translated_from": translated_from,
+                "normalized_sha256": normalized_hash,
+            }
+            try:
+                receipt = write_caption_receipt(workspace_wiki, url, video_id, 1, [output], metadata)
+            except (OSError, TypeError, ValueError):
+                output.unlink(missing_ok=True)
+                raise
+        return result_contract(
+            "ok",
+            video_id,
+            url,
+            files=[output],
+            attempts=[attempt],
+            receipt=receipt,
+            evidence_eligible=True,
+            transcript_eligible=translated_from is None,
+        )
+    except Exception as error:
+        error_class_value = transcript_api_error_class(error)
+        if error_class_value == "caption-track-absent":
+            return result_contract(
+                "no-captions",
+                video_id,
+                url,
+                attempts=[{"route": "transcript-api", "attempt": 1, "error_class": error_class_value}],
+            )
+        if error_class_value == "access-boundary":
+            return result_contract(
+                "blocked",
+                video_id,
+                url,
+                attempts=[{"route": "transcript-api", "attempt": 1, "error_class": error_class_value}],
+                error_class=error_class_value,
+                error=safe_text(str(error), 160),
+            )
+        return result_contract(
+            "error",
+            video_id,
+            url,
+            attempts=[{"route": "transcript-api", "attempt": 1, "error_class": error_class_value}],
+            error_class=error_class_value,
+            error=safe_text(str(error), 160),
+        )
+
+
 def fetch_captions(args):
     video_id, url = canonical_video(args.url)
     validate_options(args)
+    adapter_attempts = []
+    if args.adapter in {"auto", "transcript-api"}:
+        adapter_result = fetch_transcript_api(args)
+        if args.adapter == "transcript-api" or adapter_result.get("status") == "ok":
+            emit(adapter_result, transcript_api_exit_code(adapter_result))
+        if adapter_result.get("error_class") not in {"dependency-unavailable", "dependency-version"}:
+            adapter_attempts = adapter_result.get("attempts", [])
     output_dir = Path(args.output_dir or default_output_dir()).expanduser().resolve()
     validate_output_scope(output_dir)
     deadline = time.monotonic() + args.timeout
@@ -1534,7 +1931,7 @@ def fetch_captions(args):
     if not workspace_wiki or not valid_wiki(workspace_wiki):
         emit(result_contract("error", video_id, url, error_class="invalid-wiki", error="caption receipts require a valid local LLM Wiki"), 2)
     ignored_files = set(caption_snapshot(output_dir, video_id, args.sub_format))
-    attempts = []
+    attempts = adapter_attempts
     caption_status = None
     for attempt in range(1, args.attempts + 1):
         remaining = deadline - time.monotonic()
@@ -1719,7 +2116,7 @@ def caption_receipt_path(wiki, receipt_id):
     return receipt_directory(wiki) / f"{receipt_id}.json"
 
 
-def write_caption_receipt(wiki, url, video_id, attempt, files):
+def write_caption_receipt(wiki, url, video_id, attempt, files, adapter_metadata=None):
     entries = []
     for path in sorted(files or [], key=lambda value: Path(value).name):
         path = Path(path).expanduser()
@@ -1752,6 +2149,23 @@ def write_caption_receipt(wiki, url, video_id, attempt, files):
         "attempted_at": datetime.now(timezone.utc).isoformat(),
         "files": entries,
     }
+    if adapter_metadata is not None:
+        if not isinstance(adapter_metadata, dict):
+            raise ValueError("caption adapter metadata is invalid")
+        required = {
+            "adapter",
+            "adapter_version",
+            "track_language_code",
+            "track_language",
+            "track_is_generated",
+            "track_is_translatable",
+            "translated_from",
+            "normalized_sha256",
+        }
+        if set(adapter_metadata) != required:
+            raise ValueError("caption adapter metadata is incomplete")
+        receipt["schema_version"] = ADAPTER_RECEIPT_SCHEMA_VERSION
+        receipt.update(adapter_metadata)
     if not entries:
         raise ValueError("caption receipt requires at least one VTT")
     path = caption_receipt_path(wiki, receipt["receipt_id"])
@@ -2024,6 +2438,8 @@ def build_parser():
 
     captions = subparsers.add_parser("captions", help="download manual/automatic captions")
     captions.add_argument("url")
+    captions.add_argument("--adapter", choices=("auto", "yt-dlp", "transcript-api"), default="auto")
+    captions.add_argument("--allow-translation", action="store_true")
     captions.add_argument("--approve-install", action="store_true")
     captions.add_argument("--output-dir")
     captions.add_argument("--languages", default="id.*,en.*")
