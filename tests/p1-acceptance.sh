@@ -47,12 +47,18 @@ semantic_and_evidence() (
     --cwd "$workspace" --source "$source" \
     --source-url 'https://example.test/spec' --title 'Official spec')
   printf '%s' "$result" | grep -q 'canonical-evidence'
-  raw=$(find "$workspace/.wiki/raw" -type f -name 'official-spec-*.md')
+  raw=$(find "$workspace/.wiki/raw/articles" -maxdepth 1 -type f -name 'official-spec-*.md')
   test -n "$raw"
+  grep -q '^type: articles$' "$raw"
+  grep -q '^source: "https://example.test/spec"$' "$raw"
+  grep -q '^ingested: ' "$raw"
+  grep -q '^summary: "Wiki Preflight web-extraction evidence; lifecycle=unverified\."$' "$raw"
+  grep -q '^tags: \[wiki-preflight, evidence, web-extraction\]$' "$raw"
   grep -q 'content_sha256:' "$raw"
   grep -q '^status: canonical$' "$raw"
   grep -q '^valid_until: null$' "$raw"
   grep -q '^canonical_uri: "wiki://workspace/' "$raw"
+  test -z "$(find "$workspace/.wiki/raw" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' -print)"
 
   caption="$workspace/.wiki/inbox/youtube/p1.vtt"
   mkdir -p "$(dirname "$caption")"
@@ -887,6 +893,7 @@ check 'migration/version marker' migration_marker
 check 'user configuration future-schema protection' config_forward_migration
 check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-preflight"
 check 'autonomous evidence verification' from_root sh tests/evidence-verification.sh
+check 'canonical evidence compatibility and migration' from_root env LLM_WIKI_BIN="${LLM_WIKI_BIN:-}" sh tests/canonical-evidence.sh
 check 'source integrity and release gate' release_integrity
 check 'source clean-device smoke test' from_root sh tests/clean-device.sh
 check 'vendored runtime integrity tamper regression' from_root sh tests/vendor-runtime-integrity.sh

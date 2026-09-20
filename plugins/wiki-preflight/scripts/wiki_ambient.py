@@ -19,8 +19,16 @@ from urllib.parse import urlparse
 sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from youtube_fallback import YOUTUBE_HOSTS, acquire_file_lock, canonical_video, read_caption_receipt, release_file_lock
+from youtube_fallback import (
+    YOUTUBE_HOSTS,
+    acquire_file_lock,
+    canonical_video,
+    read_caption_receipt,
+    release_file_lock,
+    validate_caption_receipt,
+)
 from evidence_verification import PROVENANCE_CLASSES, canonical_public_url, eligibility
+from canonical_evidence import SHA256, canonical_source_path, render_canonical_source, source_slug
 
 
 CONFIG_TEMPLATE = Path(__file__).resolve().parents[1] / "defaults" / "ambient.json"
@@ -51,6 +59,7 @@ PERSONAL_TRANSCRIPT_MARKERS = re.compile(
 RETRIEVAL_MAX_RESULTS = 5
 RETRIEVAL_MAX_BYTES = 6000
 RETRIEVAL_MAX_FILE_BYTES = 32768
+MIGRATION_MAX_SOURCE_BYTES = 2 * 1024 * 1024
 RETRIEVAL_SIGNALS = {
     "continuation": re.compile(r"\b(?:continue|resume|previous|earlier|last time|as before|pick up)\b", re.I),
     "prior-decision": re.compile(r"\b(?:decision|decided|rationale|trade[- ]?off|agreed|why did we)\b", re.I),
@@ -124,6 +133,10 @@ CAPTURE_SECTION_NAMES = {
     "open questions": "open_questions",
     "confidence": "confidence",
 }
+
+
+class MigrationRejected(ValueError):
+    """A legacy evidence record cannot be migrated without ambiguity."""
 
 
 def git_root(path: Path):
@@ -551,15 +564,11 @@ def valid_canonical_uri(value) -> bool:
         return False
     parsed = urlparse(value)
     parts = parsed.path.split("/")
-    return (
-        parsed.scheme == "wiki"
-        and parsed.netloc in CAPTURE_SCOPES
-        and len(parts) == 4
-        and parts[1] == "capture"
-        and all(parts[2:])
-        and not parsed.query
-        and not parsed.fragment
-    )
+    if parsed.scheme != "wiki" or parsed.query or parsed.fragment:
+        return False
+    if parsed.netloc in CAPTURE_SCOPES and len(parts) == 4 and parts[1] == "capture" and all(parts[2:]):
+        return True
+    return parsed.netloc == "workspace" and len(parts) == 3 and parts[1] == "evidence" and bool(re.fullmatch(r"[0-9a-f]{64}(?:-[0-9a-f]{8})?", parts[2]))
 
 
 def resolve_local_canonical_record(local_wiki: Path, canonical_uri: str) -> Path:
@@ -940,11 +949,6 @@ confidence: {confidence}
         release_file_lock(lock_fd)
 
 
-def source_slug(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-    return slug[:80] or "source"
-
-
 def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=None, provenance_class=None, retrieval_method="local-file"):
     """Promote only supplied, attributable, non-sensitive source material to raw/."""
     load()
@@ -1019,8 +1023,28 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=
         if len(matching) != 1 or matching[0]["sha256"] != digest:
             raise SystemExit("source does not match the caption receipt file and hash")
     destination = Path(route["local_wiki"]) / "raw"
-    destination.mkdir(mode=0o700, parents=True, exist_ok=True)
-    output = destination / f"{source_slug(clean_title)}-{digest[:12]}.md"
+    if destination.is_symlink() or not destination.is_dir():
+        raise SystemExit("raw evidence directory is unavailable")
+    articles = destination / "articles"
+    if articles.is_symlink() or (articles.exists() and not articles.is_dir()):
+        raise SystemExit("raw articles directory is unavailable")
+    articles.mkdir(mode=0o700, parents=True, exist_ok=True)
+    output = canonical_source_path(destination, clean_title, digest)
+    legacy_output = destination / f"{source_slug(clean_title)}-{digest[:12]}.md"
+    if legacy_output.exists() and legacy_output != output:
+        try:
+            legacy_fields = frontmatter_fields(legacy_output.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SystemExit) as error:
+            raise SystemExit("existing canonical evidence is unreadable") from error
+        if receipt and any(legacy_fields.get(key) != value for key, value in {
+            "receipt_id": receipt["receipt_id"],
+            "transcript_sha256": digest,
+            "content_sha256": digest,
+            "provenance_class": "caption",
+            "evidence_status": "verified",
+        }.items()):
+            raise SystemExit("existing canonical evidence is not receipt-bound")
+        raise SystemExit("existing canonical evidence requires migration")
     if output.is_symlink():
         raise SystemExit("existing canonical evidence is a symlink")
     origin_workspace = workspace_identity(route, Path(route["cwd"]))
@@ -1028,38 +1052,40 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=
     if not output.exists():
         retrieved_at = datetime.now(timezone.utc)
         retrieved = retrieved_at.date().isoformat()
-        receipt_fields = (
-            f"receipt_id: {receipt['receipt_id']}\n"
-            f"transcript_sha256: {digest}\n"
-            if receipt
-            else ""
+        evidence_fields = [
+            ("schema", 1),
+            ("source_url", source_url),
+            ("retrieval_method", retrieval_method),
+            ("retrieved_at", retrieved_at.isoformat()),
+            ("retrieved", retrieved),
+            ("content_sha256", digest),
+            ("provenance_class", provenance_class),
+            ("evidence_status", evidence_status),
+            ("evidence_eligible", evidence_eligible),
+            ("transcript_eligible", transcript_eligible),
+        ]
+        if receipt:
+            evidence_fields.extend((("receipt_id", receipt["receipt_id"]), ("transcript_sha256", digest)))
+        evidence_fields.extend(
+            (
+                ("scope", "workspace"),
+                ("canonical_uri", canonical_uri),
+                ("origin_workspace", str(origin_workspace)),
+                ("status", "canonical"),
+                ("supersedes", None),
+                ("valid_from", retrieved_at.isoformat()),
+                ("valid_until", None),
+            )
         )
-        content = f"""---
-schema: 1
-type: raw-source
-title: {clean_title}
-source_url: {source_url}
-retrieval_method: {retrieval_method}
-retrieved_at: {retrieved_at.isoformat()}
-retrieved: {retrieved}
-content_sha256: {digest}
-provenance_class: {provenance_class}
-evidence_status: {evidence_status}
-evidence_eligible: {str(evidence_eligible).lower()}
-transcript_eligible: {str(transcript_eligible).lower()}
-{receipt_fields}scope: workspace
-canonical_uri: {json.dumps(canonical_uri)}
-origin_workspace: {json.dumps(str(origin_workspace))}
-status: canonical
-supersedes: null
-valid_from: {retrieved_at.isoformat()}
-valid_until: null
----
-
-# {clean_title}
-
-{body.rstrip()}
-        """
+        content = render_canonical_source(
+            title=clean_title,
+            source=source_url,
+            ingested=retrieved,
+            provenance_class=provenance_class,
+            evidence_status=evidence_status,
+            body=f"\n# {clean_title}\n\n{body.rstrip()}\n",
+            fields=evidence_fields,
+        )
         atomic_write(output, content)
     if output.exists() and not receipt:
         try:
@@ -1090,6 +1116,323 @@ valid_until: null
     if receipt:
         result.update({"receipt_id": receipt["receipt_id"], "transcript_sha256": digest})
     print(json.dumps(result))
+
+
+def migration_frontmatter_body(content: str) -> str:
+    if not content.startswith("---\n"):
+        raise MigrationRejected("frontmatter-invalid")
+    marker = re.search(r"(?m)^---\s*$", content[4:])
+    if not marker:
+        raise MigrationRejected("frontmatter-invalid")
+    return content[4 + marker.end():]
+
+
+def migration_source_url(value) -> str:
+    if not isinstance(value, str) or not value or any(character.isspace() for character in value):
+        raise MigrationRejected("source-url-invalid")
+    try:
+        parsed = urlparse(value)
+    except ValueError as error:
+        raise MigrationRejected("source-url-invalid") from error
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password or not parsed.hostname:
+        raise MigrationRejected("source-url-invalid")
+    return value
+
+
+def migration_date(fields: dict) -> str:
+    candidates = [fields.get("ingested"), fields.get("retrieved")]
+    retrieved_at = fields.get("retrieved_at")
+    if isinstance(retrieved_at, str):
+        candidates.append(retrieved_at[:10])
+    for candidate in candidates:
+        if not isinstance(candidate, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", candidate):
+            continue
+        try:
+            datetime.strptime(candidate, "%Y-%m-%d")
+        except ValueError:
+            continue
+        return candidate
+    raise MigrationRejected("ingested-date-invalid")
+
+
+def migration_boolean(fields: dict, name: str) -> bool:
+    value = fields.get(name)
+    if value not in {"true", "false"}:
+        raise MigrationRejected("eligibility-invalid")
+    return value == "true"
+
+
+def migration_body_hashes(body: str, title: str) -> set[str]:
+    variants = {body, body.lstrip("\r\n"), body.rstrip(), body.lstrip("\r\n").rstrip()}
+    stripped = body.lstrip("\r\n")
+    heading = f"# {title}\n\n"
+    if stripped.startswith(heading):
+        source_body = stripped[len(heading):]
+        variants.update({source_body, source_body.rstrip(), source_body.rstrip() + "\n"})
+    variants.add(stripped.rstrip() + "\n")
+    return {hashlib.sha256(value.encode("utf-8")).hexdigest() for value in variants}
+
+
+def migration_receipt(local_wiki: Path, receipt_id: str, source_url: str):
+    if not isinstance(receipt_id, str) or not re.fullmatch(r"[0-9a-f]{32}", receipt_id):
+        raise MigrationRejected("receipt-invalid")
+    try:
+        video_id, canonical_url = canonical_video(source_url)
+    except (TypeError, ValueError) as error:
+        raise MigrationRejected("receipt-source-invalid") from error
+    receipt_path = local_wiki / ".sessions" / "wiki-agent-system" / "youtube-receipts" / f"{receipt_id}.json"
+    current = local_wiki
+    for part in (".sessions", "wiki-agent-system", "youtube-receipts", f"{receipt_id}.json"):
+        current = current / part
+        if current.is_symlink():
+            raise MigrationRejected("receipt-symlink")
+    if not receipt_path.is_file():
+        raise MigrationRejected("receipt-missing")
+    try:
+        data = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt = validate_caption_receipt(
+            data,
+            wiki=local_wiki,
+            expected_url=canonical_url,
+            expected_video_id=video_id,
+            verify_files=True,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:
+        raise MigrationRejected("receipt-invalid") from error
+    return receipt
+
+
+def legacy_evidence_plan(local_wiki: Path, path: Path, content: str, raw_bytes: bytes):
+    candidate_hint = re.search(r"(?m)^type:\s*raw-source\s*$", content) and re.search(
+        r"(?m)^status:\s*canonical\s*$", content
+    )
+    if not content.startswith("---\n"):
+        if candidate_hint:
+            raise MigrationRejected("frontmatter-invalid")
+        return None
+    try:
+        fields = frontmatter_fields(content)
+    except (OSError, UnicodeError, SystemExit) as error:
+        if not candidate_hint:
+            return None
+        raise MigrationRejected("frontmatter-invalid") from error
+    if fields.get("type") != "raw-source" or fields.get("status") != "canonical":
+        return None
+    if fields.get("schema") not in {"1", 1}:
+        raise MigrationRejected("future-schema" if str(fields.get("schema", "")).isdigit() and int(fields["schema"]) > EVIDENCE_SCHEMA_VERSION else "schema-invalid")
+    title = fields.get("title")
+    if not isinstance(title, str) or not title.strip() or "\n" in title or "\r" in title or SENSITIVE.search(title):
+        raise MigrationRejected("title-invalid")
+    source_url = migration_source_url(fields.get("source_url") or fields.get("source"))
+    digest = fields.get("content_sha256")
+    if not isinstance(digest, str) or not SHA256.fullmatch(digest):
+        raise MigrationRejected("content-hash-invalid")
+    if len(raw_bytes) > MIGRATION_MAX_SOURCE_BYTES:
+        raise MigrationRejected("source-too-large")
+    body = migration_frontmatter_body(content)
+    if not body.strip() or SENSITIVE.search(body):
+        raise MigrationRejected("source-sensitive-or-empty")
+    if digest not in migration_body_hashes(body, title):
+        raise MigrationRejected("content-hash-mismatch")
+    provenance_class = fields.get("provenance_class")
+    evidence_status = fields.get("evidence_status")
+    try:
+        expected_evidence, expected_transcript = eligibility(provenance_class, evidence_status)
+    except ValueError as error:
+        raise MigrationRejected("evidence-lifecycle-invalid") from error
+    if migration_boolean(fields, "evidence_eligible") != expected_evidence or migration_boolean(fields, "transcript_eligible") != expected_transcript:
+        raise MigrationRejected("eligibility-mismatch")
+    transcript_sha256 = fields.get("transcript_sha256")
+    if transcript_sha256 is not None and transcript_sha256 != digest:
+        raise MigrationRejected("transcript-hash-mismatch")
+    receipt_id = fields.get("receipt_id")
+    if receipt_id is not None:
+        if provenance_class != "caption" or evidence_status != "verified":
+            raise MigrationRejected("receipt-provenance-mismatch")
+        try:
+            video_id, canonical_url = canonical_video(source_url)
+        except (TypeError, ValueError) as error:
+            raise MigrationRejected("receipt-source-invalid") from error
+        if canonical_url != source_url:
+            raise MigrationRejected("source-url-noncanonical")
+        receipt = migration_receipt(local_wiki, receipt_id, source_url)
+        if not any(entry.get("sha256") == digest for entry in receipt["files"]):
+            raise MigrationRejected("receipt-hash-mismatch")
+    elif provenance_class == "caption" or expected_transcript:
+        raise MigrationRejected("receipt-missing")
+    if evidence_status == "verified" and provenance_class == "web-extraction":
+        authority = fields.get("verification_authority")
+        host = (urlparse(source_url).hostname or "").lower().rstrip(".")
+        if not isinstance(authority, str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", authority) or not (host == authority or host.endswith(f".{authority}")):
+            raise MigrationRejected("verification-authority-invalid")
+    evidence_uri = fields.get("evidence_uri")
+    canonical_uri = fields.get("canonical_uri") or evidence_uri
+    if evidence_uri is not None and not valid_canonical_uri(evidence_uri):
+        raise MigrationRejected("canonical-uri-invalid")
+    if fields.get("canonical_uri") and evidence_uri and fields["canonical_uri"] != evidence_uri:
+        raise MigrationRejected("canonical-uri-mismatch")
+    if not valid_canonical_uri(canonical_uri):
+        raise MigrationRejected("canonical-uri-invalid")
+    ingested = migration_date(fields)
+    additive = []
+    seen = set()
+    for key, value in fields.items():
+        if key in {"title", "source", "type", "ingested", "tags", "summary"}:
+            continue
+        if key == "canonical_uri":
+            value = canonical_uri
+        additive.append((key, value))
+        seen.add(key)
+    if "source_url" not in seen:
+        additive.append(("source_url", source_url))
+    if "canonical_uri" not in seen:
+        additive.append(("canonical_uri", canonical_uri))
+    for key, value in (("supersedes", None), ("valid_from", fields.get("retrieved_at") or ingested), ("valid_until", None)):
+        if key not in seen:
+            additive.append((key, value))
+    replacement = render_canonical_source(
+        title=title,
+        source=source_url,
+        ingested=ingested,
+        provenance_class=provenance_class,
+        evidence_status=evidence_status,
+        body=body,
+        fields=additive,
+    ).encode("utf-8")
+    destination = canonical_source_path(local_wiki / "raw", title, digest)
+    return {
+        "source": path,
+        "source_bytes": raw_bytes,
+        "destination": destination,
+        "replacement": replacement,
+        "canonical_uri": canonical_uri,
+        "body": body.encode("utf-8"),
+        "digest": digest,
+    }
+
+
+def migration_wiki(cwd: str) -> Path:
+    path = Path(cwd).expanduser().resolve()
+    local_wiki = next((candidate / ".wiki" for candidate in (path, *path.parents) if (candidate / ".wiki").is_dir()), None)
+    if local_wiki is None or local_wiki.is_symlink() or wiki_status(local_wiki) != "valid":
+        raise MigrationRejected("foreign-or-incomplete-wiki")
+    return local_wiki.resolve()
+
+
+def migration_uri_locations(local_wiki: Path) -> dict[str, list[Path]]:
+    locations = {}
+    for path in local_wiki.rglob("*.md"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            fields = frontmatter_fields(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, SystemExit):
+            continue
+        uri = fields.get("canonical_uri")
+        if isinstance(uri, str):
+            locations.setdefault(uri, []).append(path)
+    return locations
+
+
+def migration_atomic_bytes(path: Path, payload: bytes):
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".evidence-migrate-")
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(payload)
+            file.flush()
+            os.fsync(file.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        try:
+            directory = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except OSError:
+            pass
+    except BaseException:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+
+
+def validate_migration_output(plan: dict, content: bytes):
+    try:
+        text = content.decode("utf-8")
+        fields = frontmatter_fields(text)
+        body = migration_frontmatter_body(text).encode("utf-8")
+    except (UnicodeError, SystemExit, MigrationRejected) as error:
+        raise MigrationRejected("replacement-invalid") from error
+    if fields.get("type") != "articles" or fields.get("source") is None or fields.get("ingested") is None or fields.get("summary") is None or fields.get("tags") is None:
+        raise MigrationRejected("replacement-invalid")
+    if fields.get("status") != "canonical" or fields.get("canonical_uri") != plan["canonical_uri"] or body != plan["body"]:
+        raise MigrationRejected("replacement-integrity-mismatch")
+
+
+def migrate_canonical_evidence(cwd: str):
+    local_wiki = migration_wiki(cwd)
+    raw = local_wiki / "raw"
+    if raw.is_symlink() or not raw.is_dir():
+        raise MigrationRejected("raw-directory-invalid")
+    plans = []
+    skipped = 0
+    for path in sorted(raw.iterdir(), key=lambda item: item.name):
+        if path.is_symlink() and path.suffix == ".md":
+            raise MigrationRejected("symlink-source")
+        if path.name == "_index.md" or path.suffix != ".md":
+            continue
+        if not path.is_file():
+            continue
+        try:
+            raw_bytes = path.read_bytes()
+            content = raw_bytes.decode("utf-8")
+        except (OSError, UnicodeError):
+            raise MigrationRejected("source-unreadable")
+        plan = legacy_evidence_plan(local_wiki, path, content, raw_bytes)
+        if plan is None:
+            skipped += 1
+            continue
+        plans.append(plan)
+    locations = migration_uri_locations(local_wiki)
+    destinations = {}
+    uris = {}
+    for plan in plans:
+        destination = plan["destination"]
+        if destination in destinations or plan["canonical_uri"] in uris:
+            raise MigrationRejected("duplicate-destination" if destination in destinations else "duplicate-canonical-uri")
+        destinations[destination] = plan
+        uris[plan["canonical_uri"]] = plan
+        external = [candidate for candidate in locations.get(plan["canonical_uri"], []) if candidate not in {plan["source"], destination}]
+        if external:
+            raise MigrationRejected("duplicate-canonical-uri")
+        if destination.exists():
+            if destination.is_symlink() or not destination.is_file():
+                raise MigrationRejected("destination-invalid")
+            try:
+                existing = destination.read_bytes()
+            except OSError as error:
+                raise MigrationRejected("destination-unreadable") from error
+            if existing != plan["replacement"]:
+                raise MigrationRejected("duplicate-destination")
+            validate_migration_output(plan, existing)
+    if not plans:
+        return {"status": "ok", "migrated": 0, "skipped": skipped, "errors": []}
+    articles = raw / "articles"
+    if articles.is_symlink() or (articles.exists() and not articles.is_dir()):
+        raise MigrationRejected("destination-directory-invalid")
+    articles.mkdir(mode=0o700, parents=True, exist_ok=True)
+    migrated = 0
+    for plan in plans:
+        destination = plan["destination"]
+        if not destination.exists():
+            migration_atomic_bytes(destination, plan["replacement"])
+        current = destination.read_bytes()
+        validate_migration_output(plan, current)
+        if plan["source"].is_symlink() or plan["source"].read_bytes() != plan["source_bytes"]:
+            raise MigrationRejected("source-changed")
+        plan["source"].unlink()
+        migrated += 1
+    return {"status": "ok", "migrated": migrated, "skipped": skipped, "errors": []}
 
 
 def intent_gate(prompt: str) -> dict:
@@ -1303,6 +1646,8 @@ def main():
     canonicalize_parser.add_argument("--receipt", "--receipt-id", dest="receipt_id")
     canonicalize_parser.add_argument("--provenance-class", choices=sorted(PROVENANCE_CLASSES - {"caption", "none"}))
     canonicalize_parser.add_argument("--retrieval-method", default="local-file")
+    migration_parser = commands.add_parser("migrate-evidence", aliases=["migrate-canonical-evidence", "migrate"])
+    migration_parser.add_argument("--cwd", default=".")
     transition_parser = commands.add_parser("transition")
     transition_parser.add_argument("--cwd", default=".")
     transition_parser.add_argument("--record", required=True)
@@ -1346,6 +1691,15 @@ def main():
             args.provenance_class,
             args.retrieval_method,
         )
+    elif args.command in {"migrate-evidence", "migrate-canonical-evidence", "migrate"}:
+        try:
+            print(json.dumps(migrate_canonical_evidence(args.cwd), sort_keys=True))
+        except MigrationRejected as error:
+            print(json.dumps({"status": "rejected", "migrated": 0, "error_class": str(error)}), file=sys.stderr)
+            raise SystemExit(2)
+        except (OSError, UnicodeError, ValueError):
+            print(json.dumps({"status": "rejected", "migrated": 0, "error_class": "migration-failed"}), file=sys.stderr)
+            raise SystemExit(2)
     elif args.command == "transition":
         transition_record(args.cwd, args.record, args.status, args.supersedes)
     elif args.command == "retrieve":

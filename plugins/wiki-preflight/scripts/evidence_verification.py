@@ -31,6 +31,7 @@ from youtube_fallback import (  # noqa: E402
     release_file_lock,
     safe_text,
 )
+from canonical_evidence import canonical_source_path, render_canonical_source
 
 
 SCHEMA_VERSION = 1
@@ -534,10 +535,16 @@ def persist_web_source(wiki, source_url, body, retrieved_at, *, evidence_status=
     raw = Path(wiki) / "raw"
     if raw.is_symlink() or not raw.is_dir():
         raise VerificationError("raw evidence directory is unavailable")
-    output = raw / f"web-extraction-{digest[:16]}.md"
-    if output.is_symlink():
-        raise VerificationError("existing web evidence is a symlink")
-    if output.exists():
+    articles = raw / "articles"
+    if articles.is_symlink() or (articles.exists() and not articles.is_dir()):
+        raise VerificationError("raw articles directory is unavailable")
+    articles.mkdir(mode=0o700, parents=True, exist_ok=True)
+    title = _source_title(body, source_url)
+    suffix = ""
+    output = canonical_source_path(raw, title, digest)
+    while output.exists():
+        if output.is_symlink():
+            raise VerificationError("existing web evidence is a symlink")
         try:
             existing = output.read_text(encoding="utf-8")
             fields = _frontmatter(existing)
@@ -547,42 +554,42 @@ def persist_web_source(wiki, source_url, body, retrieved_at, *, evidence_status=
             raise FutureSchema("existing web evidence is newer or malformed")
         if fields.get("source_url") == source_url and fields.get("provenance_class") == "web-extraction":
             return output
-        output = raw / f"web-extraction-{digest[:16]}-{hashlib.sha256(source_url.encode('utf-8')).hexdigest()[:8]}.md"
-        if output.is_symlink():
-            raise VerificationError("existing web evidence is a symlink")
-        if output.exists():
-            try:
-                existing = output.read_text(encoding="utf-8")
-                fields = _frontmatter(existing)
-            except (OSError, UnicodeError) as error:
-                raise VerificationError("existing web evidence is unreadable") from error
-            if fields.get("schema") not in {"1", 1} or fields.get("content_sha256") != digest or fields.get("source_url") != source_url:
-                raise FutureSchema("existing web evidence is newer or malformed")
-            return output
+        if suffix:
+            raise FutureSchema("duplicate web evidence destination")
+        suffix = f"-{hashlib.sha256(source_url.encode('utf-8')).hexdigest()[:8]}"
+        output = canonical_source_path(raw, title, digest, suffix)
     retrieved_at = retrieved_at or now_iso()
     evidence_uri = f"wiki://workspace/evidence/{digest}"
-    content = f"""---
-schema: 1
-type: raw-source
-title: {_source_title(body, source_url)}
-source_url: {json.dumps(source_url)}
-retrieval_method: public-http
-retrieved_at: {retrieved_at}
-retrieved: {retrieved_at[:10]}
-content_sha256: {digest}
-provenance_class: web-extraction
-evidence_status: {evidence_status}
-evidence_eligible: true
-transcript_eligible: false
-verification_authority: {authority or 'null'}
-verification_method: {('public-http-authority-and-claim-match' if evidence_status == 'verified' else 'none')}
-evidence_uri: {json.dumps(evidence_uri)}
-scope: workspace
-status: canonical
----
-
-{body.rstrip()}
-"""
+    canonical_uri = evidence_uri if not suffix else f"{evidence_uri}{suffix}"
+    content = render_canonical_source(
+        title=title,
+        source=source_url,
+        ingested=retrieved_at[:10],
+        provenance_class="web-extraction",
+        evidence_status=evidence_status,
+        body=f"\n{body.rstrip()}\n",
+        fields=(
+            ("schema", 1),
+            ("source_url", source_url),
+            ("retrieval_method", "public-http"),
+            ("retrieved_at", retrieved_at),
+            ("retrieved", retrieved_at[:10]),
+            ("content_sha256", digest),
+            ("provenance_class", "web-extraction"),
+            ("evidence_status", evidence_status),
+            ("evidence_eligible", True),
+            ("transcript_eligible", False),
+            ("verification_authority", authority),
+            ("verification_method", "public-http-authority-and-claim-match" if evidence_status == "verified" else "none"),
+            ("evidence_uri", evidence_uri),
+            ("canonical_uri", canonical_uri),
+            ("scope", "workspace"),
+            ("status", "canonical"),
+            ("supersedes", None),
+            ("valid_from", retrieved_at),
+            ("valid_until", None),
+        ),
+    )
     descriptor, temporary = tempfile.mkstemp(dir=raw, prefix=".web-evidence-", text=True)
     try:
         with os.fdopen(descriptor, "w") as file:

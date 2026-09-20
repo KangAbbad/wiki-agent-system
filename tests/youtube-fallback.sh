@@ -181,6 +181,11 @@ canonical_result=$(cd "$workspace" && HOME="$test_root/home" XDG_CONFIG_HOME="$t
 printf '%s' "$canonical_result" | grep -q 'canonical-evidence'
 printf '%s' "$canonical_result" | grep -q "\"receipt_id\": \"$first_receipt_id\""
 caption_raw=$(find "$workspace/.wiki/raw" -type f -name 'caption-fixture-*.md')
+case "$caption_raw" in
+  */raw/articles/*) ;;
+  *) exit 1 ;;
+esac
+grep -q '^type: articles$' "$caption_raw"
 grep -q "^receipt_id: $first_receipt_id$" "$caption_raw"
 grep -q '^provenance_class: caption$' "$caption_raw"
 caption_digest=$(shasum -a 256 "$output_dir/dQw4w9WgXcQ.vtt" | awk '{print $1}')

@@ -45,6 +45,19 @@ resolve=$(HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root
 printf '%s' "$resolve" | grep -q '"local_wiki":'
 printf '%s' "$resolve" | grep -q '"local_wiki_status": "valid"'
 
+printf '%s\n' 'Stable canonical evidence' >"$test_root/stable-source.md"
+stable_result=$(HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" \
+  PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" \
+  "$data_root/current/hooks/launcher.sh" "$data_root/current/scripts/wiki_ambient.py" canonicalize \
+  --cwd "$workspace" --source "$test_root/stable-source.md" \
+  --source-url 'https://example.test/stable' --title 'Stable source')
+stable_raw=$(printf '%s' "$stable_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])')
+case "$stable_raw" in
+  */raw/articles/*) ;;
+  *) exit 1 ;;
+esac
+grep -q '^type: articles$' "$stable_raw"
+
 durable_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable-durable","turn_id":"one","prompt":"Research and synthesize the cache-free runtime result"}' "$workspace")
 printf '%s' "$durable_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >/dev/null
 printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"stable-durable","turn_id":"one","last_assistant_message":"Cache-free durable capture"}' "$workspace" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/durable-stop.json"

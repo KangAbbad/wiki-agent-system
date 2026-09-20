@@ -43,6 +43,7 @@ test -f "$data_root/current/hooks/preflight.py" || fail "marketplace runtime was
 cmp "$installed_root/hooks/preflight.py" "$data_root/current/hooks/preflight.py" || fail "stable runtime differs from installed candidate"
 cmp "$installed_root/scripts/wiki_ambient.py" "$data_root/current/scripts/wiki_ambient.py" || fail "stable runtime differs from installed capture writer"
 cmp "$installed_root/scripts/evidence_verification.py" "$data_root/current/scripts/evidence_verification.py" || fail "stable runtime differs from installed verifier"
+cmp "$installed_root/scripts/canonical_evidence.py" "$data_root/current/scripts/canonical_evidence.py" || fail "stable runtime differs from installed canonical serializer"
 rm -rf "$installed_root"
 test ! -e "$installed_root" || fail "versioned marketplace cache was not removed"
 stable_root="$data_root/current"
@@ -94,4 +95,62 @@ test -f "$retention_workspace/.wiki/.trash/autosave/active.md"
 test -f "$retention_workspace/.wiki/raw/keep.md"
 test -f "$retention_workspace/.wiki/wiki/keep.md"
 mv "$fallback_vendor" "$stable_root/vendor"
+
+canonical_workspace="$root/canonical-workspace"
+mkdir -p "$canonical_workspace/.wiki/raw" "$canonical_workspace/.wiki/wiki"
+printf '%s\n' '# Workspace Wiki' >"$canonical_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$canonical_workspace/.wiki/_index.md"
+printf '%s\n' 'Marketplace canonical evidence.' >"$root/marketplace-source.md"
+canonical_result=$(HOME="$root/home" XDG_CONFIG_HOME="$root/config" \
+  "$stable_launcher" "$stable_root/scripts/wiki_ambient.py" canonicalize \
+  --cwd "$canonical_workspace" --source "$root/marketplace-source.md" \
+  --source-url 'https://example.test/marketplace' --title 'Marketplace source')
+canonical_raw=$(printf '%s' "$canonical_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])')
+case "$canonical_raw" in
+  */raw/articles/*) ;;
+  *) fail "marketplace canonical writer did not emit raw/articles" ;;
+esac
+grep -q '^type: articles$' "$canonical_raw" || fail "marketplace canonical writer emitted the wrong type"
+grep -q '^source: "https://example.test/marketplace"$' "$canonical_raw" || fail "marketplace canonical writer omitted source"
+test -z "$(find "$canonical_workspace/.wiki/raw" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' -print)" || fail "marketplace canonical writer left a direct raw record"
+
+legacy_body='Marketplace legacy evidence.'
+legacy_digest=$(printf '%s\n' "$legacy_body" | shasum -a 256 | awk '{print $1}')
+legacy_uri="wiki://workspace/evidence/$legacy_digest"
+legacy_record="$canonical_workspace/.wiki/raw/marketplace-legacy.md"
+printf '%s\n' \
+  '---' \
+  'schema: 1' \
+  'title: "Marketplace legacy"' \
+  'source_url: "https://example.test/legacy"' \
+  'type: raw-source' \
+  'retrieved: 2026-09-20' \
+  'retrieved_at: 2026-09-20T12:00:00+00:00' \
+  "content_sha256: $legacy_digest" \
+  'provenance_class: web-extraction' \
+  'evidence_status: unverified' \
+  'evidence_eligible: true' \
+  'transcript_eligible: false' \
+  "canonical_uri: \"$legacy_uri\"" \
+  'status: canonical' \
+  'supersedes: null' \
+  'valid_until: null' \
+  '---' \
+  '# Marketplace legacy' \
+  '' \
+  "$legacy_body" >"$legacy_record"
+migration_result=$(HOME="$root/home" XDG_CONFIG_HOME="$root/config" \
+  "$stable_launcher" "$stable_root/scripts/wiki_ambient.py" migrate-evidence \
+  --cwd "$canonical_workspace")
+printf '%s' "$migration_result" | python3 -c 'import json,sys; assert json.load(sys.stdin)["migrated"] == 1'
+test ! -e "$legacy_record" || fail "marketplace migration left the legacy record"
+migrated_raw=$(find "$canonical_workspace/.wiki/raw/articles" -maxdepth 1 -type f -name 'marketplace-legacy-*.md' -print)
+test -n "$migrated_raw" || fail "marketplace migration emitted no raw/articles record"
+grep -q '^type: articles$' "$migrated_raw" || fail "marketplace migration emitted the wrong type"
+grep -q '^canonical_uri: "wiki://workspace/evidence/' "$migrated_raw" || fail "marketplace migration changed canonical identity"
+grep -q 'Marketplace legacy evidence\.' "$migrated_raw" || fail "marketplace migration changed source body"
+second_migration=$(HOME="$root/home" XDG_CONFIG_HOME="$root/config" \
+  "$stable_launcher" "$stable_root/scripts/wiki_ambient.py" migrate-evidence \
+  --cwd "$canonical_workspace")
+printf '%s' "$second_migration" | python3 -c 'import json,sys; assert json.load(sys.stdin)["migrated"] == 0'
 printf '%s\n' 'PASS: Git marketplace clean-device install'

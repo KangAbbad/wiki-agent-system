@@ -39,6 +39,18 @@ printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"Stop\",\"session
 ! grep -q '"decision": "block"' "$root/stop.json"
 test -n "$(find "$root/workspace/.wiki/inbox/autosave" -type f)"
 
+printf '%s\n' 'Installed canonical evidence' >"$root/installed-source.md"
+installed_result=$(HOME="$root/home" XDG_CONFIG_HOME="$root/config" \
+  "$root/plugin/hooks/launcher.sh" "$root/plugin/scripts/wiki_ambient.py" canonicalize \
+  --cwd "$root/workspace" --source "$root/installed-source.md" \
+  --source-url 'https://example.test/installed' --title 'Installed source')
+installed_raw=$(printf '%s' "$installed_result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["path"])')
+case "$installed_raw" in
+  */raw/articles/*) ;;
+  *) exit 1 ;;
+esac
+grep -q '^type: articles$' "$installed_raw"
+
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize the installed runtime result\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed durable installed verification\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 grep -R -q 'Completed durable installed verification' "$root/workspace/.wiki/inbox/autosave"

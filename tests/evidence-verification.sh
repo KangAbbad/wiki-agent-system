@@ -61,11 +61,16 @@ assert first["item"]["evidence_status"] == "verified"
 assert first["item"]["provenance_class"] == "web-extraction"
 assert first["item"]["evidence_eligible"] is True
 assert first["item"]["transcript_eligible"] is False
-raw = list((wiki / "raw").glob("web-extraction-*.md"))
+raw = list((wiki / "raw" / "articles").glob("fixture-page-*.md"))
 assert len(raw) == 1
 raw_text = raw[0].read_text()
-for field in ("source_url:", "retrieval_method: public-http", "retrieved_at:", "content_sha256:", "provenance_class: web-extraction", "evidence_status: verified"):
-    assert field in raw_text, field
+fields = module._frontmatter(raw_text)
+assert fields["type"] == "articles"
+assert fields["source_url"] == "https://trusted.example/spec"
+assert fields["retrieval_method"] == "public-http"
+assert fields["provenance_class"] == "web-extraction"
+assert fields["evidence_status"] == "verified"
+assert fields["canonical_uri"]
 calls = []
 same_id, _ = module.ensure_queue(
     wiki,
@@ -76,7 +81,7 @@ same_id, _ = module.ensure_queue(
 assert same_id == queue_id
 assert module.drain_queue(wiki, queue_id, 2)["item"]["status"] == "verified"
 assert calls == []
-assert len(list((wiki / "raw").glob("web-extraction-*.md"))) == 1
+assert len(list((wiki / "raw" / "articles").glob("fixture-page-*.md"))) == 1
 
 module.fetch_public_source = lambda url, timeout: {
     "kind": "success",
@@ -185,7 +190,7 @@ result=$("$plugin_root/hooks/launcher.sh" "$plugin_root/scripts/wiki_ambient.py"
   --source-url 'https://example.test/extracted' --title 'Extracted public page' \
   --provenance-class web-extraction --retrieval-method public-http)
 printf '%s' "$result" | grep -q 'canonical-evidence'
-raw=$(find "$workspace/.wiki/raw" -type f -name 'extracted-public-page-*.md')
+raw=$(find "$workspace/.wiki/raw/articles" -type f -name 'extracted-public-page-*.md')
 grep -q '^retrieval_method: public-http$' "$raw"
 grep -q '^provenance_class: web-extraction$' "$raw"
 grep -q '^evidence_status: unverified$' "$raw"

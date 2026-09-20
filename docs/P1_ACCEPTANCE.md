@@ -13,6 +13,12 @@ The gate requires all controls below:
 - semantic capture redacts credential-like values and persists required outcome;
 - canonicalization accepts attributable evidence with SHA-256 provenance and
   rejects sensitive source material;
+- canonical evidence writers emit `raw/articles` records, and the explicit
+  migration path preserves eligible legacy evidence without touching ordinary
+  raw records or private runtime state;
+- `tests/canonical-evidence.sh` runs a read-only LLM Wiki lint fixture when
+  `LLM_WIKI_BIN` points to the tested `llm-wiki` binary; it requires zero
+  critical, warning, or suggestion findings and never invokes `--fix`;
 - public web extraction preserves URL, retrieval method/time, hash, provenance,
   and an explicit evidence lifecycle without upgrading it to caption evidence;
 - bounded public verification deduplicates claims, retains unverified/exhausted
