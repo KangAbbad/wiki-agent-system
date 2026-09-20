@@ -54,7 +54,11 @@ delay_name = "FAKE_YTDLP_METADATA_DELAY" if "--dump-single-json" in sys.argv els
 delay = os.environ.get(delay_name) or os.environ.get("FAKE_YTDLP_DELAY")
 if delay:
     time.sleep(float(delay))
-if os.environ.get("FAKE_YTDLP_FAIL") == "1" or (
+fail_once_file = os.environ.get("FAKE_YTDLP_FAIL_ONCE_FILE")
+fail_once = bool(fail_once_file) and "--dump-single-json" not in sys.argv and not Path(fail_once_file).exists()
+if fail_once:
+    Path(fail_once_file).write_text("failed once\n")
+if os.environ.get("FAKE_YTDLP_FAIL") == "1" or fail_once or (
     os.environ.get("FAKE_YTDLP_FAIL_CAPTION") == "1" and "--dump-single-json" not in sys.argv
 ):
     if "--dump-single-json" in sys.argv:
@@ -472,41 +476,33 @@ assert "tracking-query" not in json.dumps(item)
 assert all(attempt["route"] in {"caption", "metadata"} for attempt in item["attempts"])
 PY
 
-scheduled_workspace="$test_root/scheduled-retry-workspace"
-mkdir -p "$scheduled_workspace/.wiki/raw" "$scheduled_workspace/.wiki/wiki" "$scheduled_workspace/.wiki/inbox"
-printf '%s\n' '# Workspace Wiki' >"$scheduled_workspace/.wiki/config.md"
-printf '%s\n' '# Workspace Wiki' >"$scheduled_workspace/.wiki/_index.md"
-scheduled_prompt='Riset video https://youtu.be/S78sl3d8D1I'
-scheduled_first=$(printf '%s' "{\"cwd\":\"$scheduled_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"scheduled\",\"turn_id\":\"one\",\"prompt\":\"$scheduled_prompt\"}" \
-  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL=1 FAKE_YTDLP_METADATA=1 "$launcher" "$hook")
-printf '%s' "$scheduled_first" | grep -q 'status=retryable'
-scheduled_record=$(find "$scheduled_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
-python3 - "$scheduled_record" <<'PY'
-import json
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-data = json.loads(path.read_text())
-item = data["items"][0]
-assert item["status"] == "retryable"
-item["next_retry_at"] = 0
-path.write_text(json.dumps(data, sort_keys=True) + "\n")
-PY
-scheduled_log="$test_root/scheduled-fetches.log"
-scheduled_second=$(printf '%s' "{\"cwd\":\"$scheduled_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"scheduled\",\"turn_id\":\"one\",\"prompt\":\"$scheduled_prompt\"}" \
-  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$scheduled_log" "$launcher" "$hook")
-printf '%s' "$scheduled_second" | grep -q 'status=ok'
-python3 - "$scheduled_record" <<'PY'
+foreground_retry_workspace="$test_root/foreground-retry-workspace"
+mkdir -p "$foreground_retry_workspace/.wiki/raw" "$foreground_retry_workspace/.wiki/wiki" "$foreground_retry_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$foreground_retry_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$foreground_retry_workspace/.wiki/_index.md"
+foreground_retry_prompt='Riset video https://youtu.be/S78sl3d8D1I'
+foreground_retry_log="$test_root/foreground-retry-fetches.log"
+foreground_retry_marker="$test_root/foreground-retry-once"
+foreground_retry_output=$(printf '%s' "{\"cwd\":\"$foreground_retry_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"foreground-retry\",\"turn_id\":\"one\",\"prompt\":\"$foreground_retry_prompt\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL_ONCE_FILE="$foreground_retry_marker" FAKE_YTDLP_LOG="$foreground_retry_log" "$launcher" "$hook")
+printf '%s' "$foreground_retry_output" | grep -q 'status=ok'
+printf '%s' "$foreground_retry_output" | grep -q 'caption_evidence=verified'
+foreground_retry_record=$(find "$foreground_retry_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
+foreground_retry_controller=$(find "$foreground_retry_workspace/.wiki/.sessions/wiki-agent-system/foreground-loops" -type f -name '*.json' -print)
+python3 - "$foreground_retry_record" "$foreground_retry_controller" <<'PY'
 import json
 import sys
 
-item = json.load(open(sys.argv[1]))["items"][0]
+queue = json.load(open(sys.argv[1]))
+item = queue["items"][0]
 assert item["status"] == "ok"
-assert item["caption_state"] == "verified"
-assert item["next_retry_at"] is None
+assert item["attempt"] == 2
+assert item["retry_count"] == 1
+controller = json.load(open(sys.argv[2]))
+assert controller["state"] == "evidence-ready"
+assert controller["revision"] == 2
 PY
-test "$(wc -l <"$scheduled_log" | tr -d ' ')" -eq 1
+test "$(wc -l <"$foreground_retry_log" | tr -d ' ')" -eq 3
 
 metadata_retry_workspace="$test_root/metadata-retry-workspace"
 mkdir -p "$metadata_retry_workspace/.wiki/raw" "$metadata_retry_workspace/.wiki/wiki" "$metadata_retry_workspace/.wiki/inbox"
@@ -574,12 +570,12 @@ printf '%s\n' '# Workspace Wiki' >"$hook_workspace/.wiki/_index.md"
 historical_prompt='Tolong riset dan buat knowledge base berbahasa Indonesia dari empat video YouTube berikut: https://www.youtube.com/watch?v=S78sl3d8D1I https://www.youtube.com/watch?v=DEG-k0r9C2E https://www.youtube.com/watch?v=tGJTzahuapo https://www.youtube.com/watch?v=62qCljKilH8'
 hook_output=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"prompt\":\"$historical_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$hook_log" "$launcher" "$hook")
-printf '%s' "$hook_output" | grep -q 'YouTube foreground evidence loop'
+printf '%s' "$hook_output" | grep -q 'YouTube evidence (bounded foreground acquisition)'
 printf '%s' "$hook_output" | grep -q 'status=ok'
 printf '%s' "$hook_output" | grep -q 'caption_evidence=verified'
 printf '%s' "$hook_output" | grep -q 'receipt_id='
 printf '%s' "$hook_output" | grep -q 'caption_sha256='
-printf '%s' "$hook_output" | grep -q 'queued=2 additional YouTube URL(s)'
+printf '%s' "$hook_output" | grep -q 'terminal=4; pending=0'
 ! printf '%s' "$hook_output" | grep -Fq 'skipped='
 ! printf '%s' "$hook_output" | grep -Fq 'process on demand'
 ! printf '%s' "$hook_output" | grep -Fq '$PLUGIN_ROOT'
@@ -597,17 +593,16 @@ data = json.loads(Path(sys.argv[1]).read_text())
 assert data["schema_version"] == 3
 assert len(data["items"]) == 4
 assert all(item["status"] in {"pending", "ok", "no-captions", "retryable", "exhausted", "error", "blocked", "blocked-install"} for item in data["items"])
-assert sum(item["status"] == "pending" for item in data["items"]) == 2
+assert all(item["status"] == "ok" for item in data["items"])
 assert all("session" not in json.dumps(item).lower() for item in data["items"])
 assert not any(key in json.dumps(data) for key in ("PLUGIN_ROOT", "PLUGIN_DATA"))
 PY
-test "$(wc -l <"$hook_log" | tr -d ' ')" -eq 2
+test "$(wc -l <"$hook_log" | tr -d ' ')" -eq 4
 blocked_stop=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"last_assistant_message\":\"Still collecting video evidence\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
 printf '%s' "$blocked_stop" | grep -q '"decision": "block"'
-continuation_output=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"prompt\":\"Foreground continuation\"}" \
-  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$hook_log" "$launcher" "$hook")
-printf '%s' "$continuation_output" | grep -q 'state=evidence-ready'
+blocked_reason=$(printf '%s' "$blocked_stop" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')
+! printf '%s' "$blocked_reason" | grep -Eq 'queue_id|revision=|loop=|/wiki-agent-system|simulated yt-dlp failure'
 python3 - "$hook_workspace" "$queue_record" <<'PY'
 import hashlib
 import json
@@ -684,10 +679,30 @@ mkdir -p "$interrupt_workspace/.wiki/raw" "$interrupt_workspace/.wiki/wiki" "$in
 printf '%s\n' '# Workspace Wiki' >"$interrupt_workspace/.wiki/config.md"
 printf '%s\n' '# Workspace Wiki' >"$interrupt_workspace/.wiki/_index.md"
 interrupt_url='https://www.youtube.com/watch?v=dQw4w9WgXcQ'
-interrupt_initial=$(printf '%s' "{\"cwd\":\"$interrupt_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"interrupt\",\"turn_id\":\"one\",\"prompt\":\"Riset video $interrupt_url\"}" \
-  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL=1 "$launcher" "$hook")
-printf '%s' "$interrupt_initial" | grep -q 'state=retryable'
+"$launcher" "$script" queue --workspace "$interrupt_workspace" --session-id interrupt --turn-id one "$interrupt_url" >/dev/null
 interrupt_queue=$(find "$interrupt_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
+python3 - "$hook" "$interrupt_workspace" <<'PY'
+import contextlib
+import importlib.util
+import io
+import json
+import sys
+from pathlib import Path
+
+hook, workspace = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("preflight", hook)
+module = importlib.util.module_from_spec(spec)
+sys.stdin = io.StringIO(json.dumps({"cwd": str(workspace), "hook_event_name": "SessionStart"}))
+with contextlib.redirect_stdout(io.StringIO()):
+    spec.loader.exec_module(module)
+wiki = workspace / ".wiki"
+queue_id = module.queue_id_for("interrupt", "one")
+module.foreground_controller_directory(wiki)
+path, _ = module.foreground_controller_paths(wiki, queue_id)
+controller = module.new_foreground_controller(queue_id)
+controller.update({"state": "retryable", "action": "caption-retry"})
+module.atomic_queue_write(path, controller)
+PY
 interrupt_controller=$(find "$interrupt_workspace/.wiki/.sessions/wiki-agent-system/foreground-loops" -type f -name '*.json' -print)
 python3 - "$interrupt_queue" "$interrupt_controller" "$interrupt_workspace" <<'PY'
 import hashlib
@@ -808,11 +823,12 @@ printf '%s\n' '# Workspace Wiki' >"$slow_workspace/.wiki/config.md"
 printf '%s\n' '# Workspace Wiki' >"$slow_workspace/.wiki/_index.md"
 slow_started=$(date +%s)
 slow_output=$(printf '%s' "{\"cwd\":\"$slow_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"slow-hook\",\"turn_id\":\"one\",\"prompt\":\"$historical_prompt\"}" \
-  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_CAPTION_DELAY=11 FAKE_YTDLP_METADATA_DELAY=15 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$hook")
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_CAPTION_DELAY=8 FAKE_YTDLP_METADATA_DELAY=10 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$hook")
 slow_elapsed=$(( $(date +%s) - slow_started ))
 test "$slow_elapsed" -lt 45
 printf '%s' "$slow_output" | grep -q 'status=retryable'
-printf '%s' "$slow_output" | grep -q 'terminal=0; pending=3'
+printf '%s' "$slow_output" | grep -Eq 'terminal=0; pending=[1-4]'
+printf '%s' "$slow_output" | grep -q 'acquisition: state=exhausted'
 slow_record=$(find "$slow_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$slow_record" <<'PY'
 import json
@@ -890,8 +906,8 @@ no_identity_first=$(printf '%s' "{\"cwd\":\"$no_identity_workspace\",\"hook_even
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$no_identity_log" "$launcher" "$hook")
 no_identity_second=$(printf '%s' "{\"cwd\":\"$no_identity_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"\",\"turn_id\":\"\",\"prompt\":\"$no_identity_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$no_identity_log" "$launcher" "$hook")
-printf '%s' "$no_identity_first" | grep -q 'queue: status=unavailable; reason=queue requires complete session and turn ids'
-printf '%s' "$no_identity_second" | grep -q 'queue: status=unavailable; reason=queue requires complete session and turn ids'
+printf '%s' "$no_identity_first" | grep -q 'acquisition=unavailable; no transcript claim is eligible.'
+printf '%s' "$no_identity_second" | grep -q 'acquisition=unavailable; no transcript claim is eligible.'
 test ! -e "$no_identity_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues"
 test ! -e "$no_identity_workspace/.wiki/inbox/youtube/S78sl3d8D1I.vtt"
 test ! -e "$no_identity_log"
@@ -975,7 +991,7 @@ printf '%s\n' '# Workspace Wiki' >"$pending_workspace/.wiki/_index.md"
 pending_prompt='Riset lima video: https://www.youtube.com/watch?v=S78sl3d8D1I https://www.youtube.com/watch?v=DEG-k0r9C2E https://www.youtube.com/watch?v=tGJTzahuapo https://www.youtube.com/watch?v=62qCljKilH8 https://www.youtube.com/watch?v=dQw4w9WgXcQ'
 pending_output=$(printf '%s' "{\"cwd\":\"$pending_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"pending\",\"turn_id\":\"one\",\"prompt\":\"$pending_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$test_root/pending-fetches.log" "$launcher" "$hook")
-printf '%s' "$pending_output" | grep -q 'terminal=2; pending=3'
+printf '%s' "$pending_output" | grep -q 'terminal=5; pending=0'
 pending_record=$(find "$pending_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$pending_record" <<'PY'
 import json
@@ -983,17 +999,6 @@ import sys
 
 data = json.load(open(sys.argv[1]))
 assert len(data["items"]) == 5
-assert sum(item["status"] == "pending" for item in data["items"]) == 3
-PY
-for continuation in one two; do
-  printf '%s' "{\"cwd\":\"$pending_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"pending\",\"turn_id\":\"one\",\"prompt\":\"Foreground continuation $continuation\"}" \
-    | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$test_root/pending-fetches.log" "$launcher" "$hook" >/dev/null
-done
-python3 - "$pending_record" <<'PY'
-import json
-import sys
-
-data = json.load(open(sys.argv[1]))
 assert all(item["status"] == "ok" for item in data["items"])
 PY
 python3 - "$pending_workspace" "$pending_record" <<'PY'

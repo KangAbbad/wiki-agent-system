@@ -237,9 +237,8 @@ gate = module.stop_foreground_gate(wiki, {
     "turn_id": "controller-turn",
     "last_assistant_message": "still working",
 })
-assert gate["block"] is True
-assert queue_id in gate["reason"]
-assert "controller-session" not in gate["reason"]
+assert gate["block"] is False and gate["capture"] is True, gate
+assert gate["reason"] == ""
 
 status, state, error = module.update_foreground_controller(
     wiki, queue_id, state["revision"], state="exhausted",

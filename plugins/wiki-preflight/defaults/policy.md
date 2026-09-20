@@ -50,8 +50,8 @@ authorization.
 
 For a prompt that asks to research, ingest, summarize, cite, or transcribe a
 YouTube video, `UserPromptSubmit` owns ordinary YouTube ingestion. It
-automatically invokes the bundled helper for at most two canonical video URLs.
-It uses one short attempt per URL, does not install anything, and writes only
+automatically invokes the bundled helper for a bounded set of canonical video
+URLs. It uses bounded attempts per URL, does not install anything, and writes only
 fresh manual or automatic VTT captions to the current valid Wiki's
 `inbox/youtube/` directory. The hook injects the helper's JSON status and new
 file paths into the agent context, so a missing transcript is not treated as
@@ -92,15 +92,14 @@ SessionStart worker; a new user prompt is not required.
 
 YouTube caption work uses a durable foreground controller. `UserPromptSubmit`
 creates or resolves one job for the measured `session_id` + `turn_id` identity,
-then performs one bounded caption step. If the job is still `pending`,
-`running`, or `retryable`, the Stop hook emits a compact `decision=block`
-continuation with only the opaque job reference, next action, revision, and
-loop count. The continuation re-enters `UserPromptSubmit`; no user-side shell
-action, repeated prompt, daemon, or scheduler is required. `Interrupt` returns
-uncompleted claims to `pending` and preserves the same checkpoint.
+then runs one bounded foreground worker through due caption attempts. It honors
+`next_retry_at`, advances the controller revision for every executed pass, and
+ends at a terminal evidence state or bounded `exhausted` result. No user-side
+shell action, repeated prompt, daemon, or scheduler is required. `Interrupt`
+returns uncompleted claims to `pending` and preserves the same checkpoint.
 
-The controller gives one job a shared 40-second budget, four continuation
-steps, one allowlisted action at a time, and the existing per-queue retry cap.
+The controller gives one job a shared 40-second budget, four foreground
+passes, one allowlisted action at a time, and the existing per-queue retry cap.
 Each URL has one total helper deadline; caption attempts, bounded backoff, and
 the permitted metadata route share it, so metadata can use only the time
 remaining after captions and cannot extend the URL or job deadline. Its state is
@@ -117,9 +116,8 @@ retryable failures are `exhausted`. Metadata remains available as a separate
 
 If the result is `install-approval-required`, pause that URL and report the
 bounded blocked status. The automatic hook never installs a dependency or
-claims a caption that was not acquired. A foreground continuation always
-honors `next_retry_at`; it must not force-claim a retry before its backoff is
-due.
+claims a caption that was not acquired. The foreground worker always honors
+`next_retry_at`; it must not force-claim a retry before its backoff is due.
 
 Stop finalization has two gates. Receipt validation produces `evidence-ready`,
 not completion. `verified` additionally requires exactly one bounded

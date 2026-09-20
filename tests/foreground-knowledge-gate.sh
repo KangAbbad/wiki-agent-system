@@ -139,7 +139,7 @@ duplicate.unlink()
 artifact.write_text(artifact.read_text().replace("Grounded claim mapping", "Tampered claim mapping"))
 gate = module.stop_foreground_gate(wiki, payload)
 assert gate["block"] is True and gate["capture"] is False, gate
-assert "hash mismatch" in gate["reason"]
+assert gate["reason"] == "Caption evidence is ready; finish the receipt-bound knowledge artifact before completing."
 
 retry_id = module.queue_id_for("backoff-session", "backoff-turn")
 retry_url = "https://youtu.be/9bZkp7q19f0"
@@ -179,6 +179,35 @@ status, retry_data, error = youtube_fallback.read_queue(retry_path, retry_id)
 assert status == "valid", (status, error)
 assert retry_data["items"][0]["status"] == "retryable", retry_data
 assert retry_data["items"][0]["next_retry_at"] > time.time(), retry_data
+retry_state = module.read_foreground_controller(wiki, retry_id)[1]
+assert retry_state["state"] == "exhausted", retry_state
+assert retry_state["revision"] == 1, retry_state
+for _ in range(2):
+    retry_gate = module.stop_foreground_gate(wiki, {
+        "session_id": "backoff-session",
+        "turn_id": "backoff-turn",
+        "last_assistant_message": "bounded retry result",
+    })
+    assert retry_gate["block"] is False and retry_gate["capture"] is True, retry_gate
+
+no_progress_id = module.queue_id_for("no-progress-session", "no-progress-turn")
+no_progress_url = "https://youtu.be/aqz-KE-bpKQ"
+youtube_fallback.ensure_queue(wiki, [no_progress_url], no_progress_id)
+no_progress_controller = controller(no_progress_id, "pending", "caption-attempt", time.time() + 20)
+original_drain = module.bounded_youtube_drain
+module.bounded_youtube_drain = lambda *args, **kwargs: {"processed": 1}
+try:
+    module.advance_foreground_controller(
+        wiki,
+        workspace,
+        "",
+        {"session_id": "no-progress-session", "turn_id": "no-progress-turn"},
+    )
+finally:
+    module.bounded_youtube_drain = original_drain
+no_progress_state = module.read_foreground_controller(wiki, no_progress_id)[1]
+assert no_progress_state["state"] == "exhausted", no_progress_state
+assert no_progress_state["revision"] == 1, no_progress_state
 
 print("foreground knowledge gate and backoff contract passed")
 PY

@@ -34,9 +34,10 @@ Runtime paths are internal; no terminal invocation is part of the normal
 agent workflow.
 
 For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
-ingestion. A durable foreground controller continues pending queue entries via
-the official Stop continuation while the task is active. No user-side command,
-repeated prompt, daemon, or scheduler is required.
+ingestion. A durable foreground controller drains due queue entries in one
+bounded worker, including permitted retries, until terminal evidence or
+`exhausted`. No user-side command, repeated prompt, daemon, or scheduler is
+required.
 
 The hook context is authoritative about caption eligibility only when it says
 `caption_evidence=verified` and provides `receipt_id`, `caption_sha256`, and
@@ -45,10 +46,10 @@ flow when creating evidence. Treat `stale-or-unreceipted`, `metadata-only`,
 `no-verified-caption`, and `machine-transcription` as ineligible for transcript
 facts, even when a file is present.
 
-Caption transport failures are reported as `retry-scheduled` while the durable
-foreground continuation is pending; do not ask the user to repeat the prompt.
-The continuation honors `next_retry_at` and never forces a retry before its
-backoff is due. Only `caption_evidence=verified` is transcript evidence.
+Caption transport failures are retried by the bounded foreground worker; do
+not ask the user to repeat the prompt. The worker honors `next_retry_at` and
+never forces a retry before its backoff is due. Only
+`caption_evidence=verified` is transcript evidence.
 
 The plugin vendors `youtube-transcript-api==1.2.4` and its pure-Python runtime
 dependencies under `vendor/`, with upstream LICENSE texts, a hash manifest for
@@ -61,11 +62,13 @@ receipt. Missing or mismatched runtime falls back to `yt-dlp`; never install at
 hook runtime or use proxy, cookie, login, or paid-provider access. Translated
 tracks remain reading aids and are not transcript-eligible.
 
-Stop blocks a YouTube job while its controller is `pending`, `running`,
-`retryable`, or `evidence-ready`. Receipt validity produces `evidence-ready`
-only. It permits terminal `verified` only after exactly one `youtube-knowledge`
-artifact in Wiki `wiki/` binds the queue/source URLs, artifact hash, receipt
-IDs, every caption hash, and claim-to-evidence references, and passes
+Stop is capture/finalization only. It never executes or schedules caption retry
+and does not block `pending`, `running`, or `retryable` acquisition states.
+Receipt validity produces `evidence-ready` only; Stop may block that state until
+the current agent supplies the required artifact. It permits terminal `verified`
+only after exactly one `youtube-knowledge` artifact in Wiki `wiki/` binds the
+queue/source URLs, artifact hash, receipt IDs, every caption hash, and
+claim-to-evidence references, and passes
 `provenance_class=caption`, `evidence_status=verified`, `grounded=true`,
 `quality_status=verified`, `## Synthesis`, `## Sources`, and `## Quality` gates.
 Missing, stale, tampered, unrelated, or duplicate artifacts remain blocked.

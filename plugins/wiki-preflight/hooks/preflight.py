@@ -19,6 +19,7 @@ from youtube_fallback import (
     recover_queue_leases,
     release_file_lock,
     safe_text,
+    TIMEOUT_MIN,
     validate_caption_receipt,
 )
 
@@ -34,7 +35,6 @@ YOUTUBE_ACTION_PATTERN = re.compile(
     r"\b(?:analy[sz]e|analisis|caption|cite|ingest|knowledge|kutip|pelajari|rangkum|research|riset|scrap(?:e|ing)?|subtitle|summar(?:ize|ise|y|izing|ising)|transcript|transkrip)\b",
     re.I,
 )
-YOUTUBE_PREFLIGHT_MAX_URLS = 2
 YOUTUBE_PREFLIGHT_DEADLINE = 16
 YOUTUBE_DRAIN_DEADLINE = 20
 YOUTUBE_DRAIN_MAX_URLS = 2
@@ -511,7 +511,7 @@ def youtube_prompt_urls(prompt):
 
 def bounded_youtube_drain(cwd, queue_id, max_seconds, hook_deadline, limit):
     remaining = hook_deadline - time.monotonic()
-    if remaining < 1:
+    if remaining <= TIMEOUT_MIN:
         return {"status": "deadline", "queue_id": queue_id, "processed": 0}
     return drain_queue(
         cwd,
@@ -559,11 +559,9 @@ def evidence_context(wiki, item):
     if item.get("status") == "metadata-only" or (item.get("status") == "no-captions" and item.get("metadata_state") == "acquired"):
         return "caption_evidence=ineligible; reason=metadata-only; receipt=missing-or-invalid", "metadata-only"
     if item.get("status") == "retryable":
-        category = safe_text(str(item.get("error_class") or "caption-fetch-failed"), 80)
-        return f"caption_evidence=ineligible; reason=retry-scheduled; category={category}; user-retry=not-required", "retry-scheduled"
+        return "caption_evidence=ineligible; reason=retry-pending; receipt=missing-or-invalid", "retry-scheduled"
     if item.get("status") == "exhausted":
-        category = safe_text(str(item.get("error_class") or "caption-fetch-failed"), 80)
-        return f"caption_evidence=ineligible; reason=retry-exhausted; category={category}; receipt=missing-or-invalid", "exhausted"
+        return "caption_evidence=ineligible; reason=retry-exhausted; receipt=missing-or-invalid", "exhausted"
     helper_status = item.get("helper_status")
     if helper_status == "stale-captions-ignored" or item.get("evidence_reason") == "stale-caption-ignored":
         return "caption_evidence=ineligible; reason=stale-or-unreceipted; receipt=missing-or-invalid", "stale-or-unreceipted"
@@ -750,8 +748,24 @@ def foreground_outcome(wiki, snapshot):
     return "exhausted", "caption queue exhausted"
 
 
+def foreground_snapshot_signature(snapshot):
+    if snapshot.get("status") != "ok":
+        return (snapshot.get("status"), snapshot.get("error"))
+    return tuple(
+        (
+            item.get("url"),
+            item.get("status"),
+            item.get("attempt"),
+            item.get("retry_count"),
+            item.get("next_retry_at"),
+            item.get("lease_until"),
+        )
+        for item in snapshot.get("records", [])
+    )
+
+
 def foreground_context(root, snapshot, controller, urls):
-    lines = ["YouTube foreground evidence loop (bounded; no installer approval supplied):"]
+    lines = ["YouTube evidence (bounded foreground acquisition):"]
     if snapshot.get("status") != "ok":
         lines.append(f"- queue: status={safe_text(str(snapshot.get('status') or 'unavailable'), 80)}; no mutation")
     else:
@@ -774,26 +788,19 @@ def foreground_context(root, snapshot, controller, urls):
             if item["status"] == "blocked":
                 lines.append("  access=blocked; report bounded access boundary")
             if evidence == "retry-scheduled":
-                lines.append("  retry=automatic continuation; do not ask the user to repeat the prompt")
+                lines.append("  retry=foreground worker bounded; no user action requested")
             if evidence == "exhausted":
                 lines.append("  retry=automatic cap reached; transcript evidence remains unavailable")
             if transcript == "not-available":
                 lines.append("  transcript=not-available; stale/unreceipted captions, metadata-only, and machine-transcription cannot support transcript claims")
         if all(item.get("status") == "ok" and verified_caption_receipt(root, item) for item in snapshot["records"]):
-            artifact_status, _, artifact_reason = knowledge_artifact_snapshot(root, controller["queue_id"], snapshot)
+            artifact_status, _, _ = knowledge_artifact_snapshot(root, controller["queue_id"], snapshot)
             lines.append(f"- knowledge: artifact={artifact_status}; provenance=caption; quality={'verified' if artifact_status == 'verified' else 'required'}")
             if artifact_status != "verified":
-                lines.append(f"  knowledge=artifact-required; action=knowledge-synthesis; reason={safe_text(artifact_reason or 'quality gate pending', 120)}")
-        if len(urls) > YOUTUBE_PREFLIGHT_MAX_URLS:
-            lines.append(
-                f"- queued={max(0, len(urls) - YOUTUBE_PREFLIGHT_MAX_URLS)} additional YouTube URL(s); "
-                f"terminal={snapshot['terminal']}; pending={snapshot['pending']}."
-            )
-    lines.append(
-        f"- controller: state={controller['state']}; action={controller['action']}; "
-        f"revision={controller['revision']}; loop={controller['loop_count']}/{FOREGROUND_LOOP_CAP}; "
-        f"reason={controller['reason']}"
-    )
+                lines.append("  knowledge=artifact-required; finish the receipt-bound synthesis before completion")
+        if len(urls) > 1:
+            lines.append(f"- queue: terminal={snapshot['terminal']}; pending={snapshot['pending']}.")
+    lines.append(f"- acquisition: state={controller['state']}")
     lines.append("Transcript evidence requires caption_evidence=verified with receipt_id and caption_sha256; stale/unreceipted captions, metadata-only, and machine-transcription are ineligible for transcript facts.")
     if controller["state"] == "evidence-ready":
         lines.append("Knowledge completion requires one receipt-bound, hash-bound, grounded artifact with verified provenance and quality sections before Stop can finish.")
@@ -808,17 +815,17 @@ def advance_foreground_controller(root, cwd, prompt, payload):
     if not urls and not queue_id:
         return ""
     if urls and not queue_id:
-        return "YouTube foreground evidence loop:\n- queue: status=unavailable; reason=queue requires complete session and turn ids\nTranscript evidence requires a verified receipt; no transcript claim is eligible."
+        return "YouTube evidence:\n- acquisition=unavailable; no transcript claim is eligible."
     try:
         if urls:
             ensure_queue(root, urls, queue_id)
-            controller_status, controller, error = ensure_foreground_controller(root, queue_id)
+            controller_status, controller, _ = ensure_foreground_controller(root, queue_id)
         else:
-            controller_status, controller, error = read_foreground_controller(root, queue_id)
+            controller_status, controller, _ = read_foreground_controller(root, queue_id)
             if controller_status == "missing":
                 return ""
         if controller_status in {"future-schema", "invalid", "unavailable"}:
-            return f"YouTube foreground evidence loop:\n- controller: status=unavailable; reason={safe_text(str(error or controller_status), 120)}"
+            return "YouTube evidence:\n- acquisition=unavailable; no transcript claim is eligible."
         if controller["state"] in FOREGROUND_TERMINAL_STATES:
             snapshot = queue_snapshot(root, queue_id)
             return foreground_context(root, snapshot, controller, urls)
@@ -852,58 +859,83 @@ def advance_foreground_controller(root, cwd, prompt, payload):
             controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
             return foreground_context(root, snapshot, controller, urls)
         now = time.time()
-        if controller["loop_count"] >= FOREGROUND_LOOP_CAP or controller["deadline_at"] <= now:
-            state = "exhausted"
-            reason = "foreground loop budget exhausted" if controller["deadline_at"] <= now else "foreground loop cap exhausted"
+        hook_deadline = time.monotonic() + min(YOUTUBE_HOOK_BUDGET, max(1, controller["deadline_at"] - now))
+        while True:
+            now = time.time()
+            if controller["loop_count"] >= FOREGROUND_LOOP_CAP or controller["deadline_at"] <= now:
+                reason = "foreground loop budget exhausted" if controller["deadline_at"] <= now else "foreground loop cap exhausted"
+                updated, next_controller, _ = update_foreground_controller(
+                    root,
+                    queue_id,
+                    controller["revision"],
+                    state="exhausted",
+                    action="terminal-caption-result",
+                    reason=reason,
+                )
+                controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
+                return foreground_context(root, queue_snapshot(root, queue_id), controller, urls)
+
+            action = controller["action"]
+            if action == "caption-retry":
+                retry_snapshot = queue_snapshot(root, queue_id)
+                has_future_retry = any(
+                    item.get("status") == "retryable"
+                    and type(item.get("next_retry_at")) in (int, float)
+                    and item["next_retry_at"] > time.time()
+                    for item in retry_snapshot.get("records", [])
+                )
+                if has_future_retry and not foreground_backoff_wait(root, queue_id, hook_deadline):
+                    updated, next_controller, _ = update_foreground_controller(
+                        root,
+                        queue_id,
+                        controller["revision"],
+                        state="exhausted",
+                        action="terminal-caption-result",
+                        reason="foreground retry budget exhausted",
+                    )
+                    controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
+                    return foreground_context(root, queue_snapshot(root, queue_id), controller, urls)
+
+            before_snapshot = queue_snapshot(root, queue_id)
+            result = bounded_youtube_drain(
+                cwd,
+                queue_id,
+                YOUTUBE_PREFLIGHT_DEADLINE if action == "caption-attempt" else YOUTUBE_DRAIN_DEADLINE,
+                hook_deadline,
+                YOUTUBE_DRAIN_MAX_URLS,
+            )
+            snapshot = queue_snapshot(root, queue_id)
+            state, reason = foreground_outcome(root, snapshot)
+            loop_count = controller["loop_count"] + 1
+            progressed = (
+                result.get("processed", 0) > 0
+                and foreground_snapshot_signature(before_snapshot) != foreground_snapshot_signature(snapshot)
+            )
+            if not progressed and state not in FOREGROUND_TERMINAL_STATES:
+                state, reason = "exhausted", "foreground worker made no progress"
+            elif state not in FOREGROUND_TERMINAL_STATES and (
+                loop_count >= FOREGROUND_LOOP_CAP or controller["deadline_at"] <= time.time()
+            ):
+                state, reason = "exhausted", "foreground loop budget exhausted"
+            next_action = "terminal-caption-result" if state in FOREGROUND_TERMINAL_STATES else "caption-retry"
+            if state == "pending":
+                next_action = "caption-attempt"
+            elif state == "evidence-ready":
+                next_action = "knowledge-synthesis"
             updated, next_controller, _ = update_foreground_controller(
                 root,
                 queue_id,
                 controller["revision"],
                 state=state,
-                action="terminal-caption-result",
+                action=next_action,
+                loop_count=loop_count,
                 reason=reason,
             )
             controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
-            snapshot = queue_snapshot(root, queue_id)
-            return foreground_context(root, snapshot, controller, urls)
-
-        action = controller["action"]
-        hook_deadline = time.monotonic() + min(YOUTUBE_HOOK_BUDGET, max(1, controller["deadline_at"] - now))
-        if action == "caption-retry":
-            foreground_backoff_wait(root, queue_id, hook_deadline)
-        result = bounded_youtube_drain(
-            cwd,
-            queue_id,
-            YOUTUBE_PREFLIGHT_DEADLINE if action == "caption-attempt" else YOUTUBE_DRAIN_DEADLINE,
-            hook_deadline,
-            YOUTUBE_PREFLIGHT_MAX_URLS,
-        )
-        snapshot = queue_snapshot(root, queue_id)
-        state, reason = foreground_outcome(root, snapshot)
-        loop_count = controller["loop_count"] + 1
-        if state not in FOREGROUND_TERMINAL_STATES and loop_count >= FOREGROUND_LOOP_CAP:
-            state, reason = "exhausted", "foreground loop cap exhausted"
-        next_action = "terminal-caption-result" if state in FOREGROUND_TERMINAL_STATES else "caption-retry"
-        if state == "evidence-ready":
-            next_action = "knowledge-synthesis"
-        updated, next_controller, _ = update_foreground_controller(
-            root,
-            queue_id,
-            controller["revision"],
-            state=state,
-            action=next_action,
-            loop_count=loop_count,
-            reason=reason,
-        )
-        if updated == "stale":
-            controller = next_controller
-        elif updated == "updated":
-            controller = next_controller
-        else:
-            controller = controller
-        return foreground_context(root, snapshot, controller, urls)
-    except (OSError, QueueError) as error:
-        return f"YouTube foreground evidence loop:\n- queue: status=unavailable; reason={safe_text(str(error), 160)}\nTranscript evidence requires a verified receipt; no transcript claim is eligible."
+            if state in FOREGROUND_TERMINAL_STATES or state == "evidence-ready" or updated not in {"updated", "stale"}:
+                return foreground_context(root, snapshot, controller, urls)
+    except (OSError, QueueError):
+        return "YouTube evidence:\n- acquisition=unavailable; no transcript claim is eligible."
 
 
 def terminal_report_is_safe(payload, controller):
@@ -939,7 +971,7 @@ def stop_foreground_gate(root, payload):
     if status in {"future-schema", "invalid", "unavailable"}:
         return {
             "block": False,
-            "reason": "foreground controller unavailable; semantic capture suppressed",
+            "reason": "foreground evidence unavailable; semantic capture suppressed",
             "capture": False,
         }
     if status not in {"valid", "created", "migrated"} or not controller:
@@ -960,7 +992,7 @@ def stop_foreground_gate(root, payload):
                 controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
             return {
                 "block": True,
-                "reason": f"Foreground YouTube job {queue_id} is evidence-ready; next_action=knowledge-synthesis; revision={controller['revision']}; loop={controller['loop_count']}/{FOREGROUND_LOOP_CAP}; reason={safe_text(artifact_reason or 'knowledge artifact required', 120)}.",
+                "reason": "Caption evidence is ready; finish the receipt-bound knowledge artifact before completing.",
                 "capture": False,
             }
         if controller["state"] == "evidence-ready":
@@ -975,10 +1007,13 @@ def stop_foreground_gate(root, payload):
             controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
     if controller["state"] not in FOREGROUND_TERMINAL_STATES:
         return {
-            "block": True,
-            "reason": f"Foreground YouTube job {queue_id} is {controller['state']}; next_action={controller['action']}; revision={controller['revision']}; loop={controller['loop_count']}/{FOREGROUND_LOOP_CAP}.",
-            "capture": False,
+            "block": False,
+            "reason": "",
+            "capture": True,
         }
+    if controller["state"] == "exhausted" and snapshot.get("status") == "ok":
+        if any(item.get("status") in {"pending", "running", "retryable"} for item in snapshot.get("records", [])):
+            return {"block": False, "reason": "", "capture": True}
     if controller["state"] in {"exhausted", "blocked"} and not terminal_report_is_safe(payload, controller):
         if controller["report_attempts"] == 0:
             _, updated, _ = update_foreground_controller(
@@ -991,7 +1026,7 @@ def stop_foreground_gate(root, payload):
             revision = updated["revision"] if updated else controller["revision"]
             return {
                 "block": True,
-                "reason": f"Foreground YouTube job {queue_id} is {controller['state']}; next_action=terminal-caption-result; revision={revision}; report=terminal-provenance.",
+                "reason": "A terminal YouTube evidence result needs a sanitized provenance report before completion.",
                 "capture": False,
             }
         discard_finalizer_state(root, payload)

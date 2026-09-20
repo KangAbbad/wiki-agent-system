@@ -50,9 +50,10 @@ and a valid `canonical_uri` in Workspace Wiki, then User Wiki, then Mnemosyne
 hints. Mnemosyne hints are non-authoritative.
 
 For ordinary YouTube knowledge tasks, `UserPromptSubmit` owns bounded
-ingestion. A durable foreground controller continues pending queue entries via
-the official Stop continuation while the task is active. No user-side command,
-repeated prompt, daemon, or scheduler is required.
+ingestion. A durable foreground controller drains due queue entries in one
+bounded worker, including permitted retries, until terminal evidence or
+`exhausted`. No user-side command, repeated prompt, daemon, or scheduler is
+required.
 
 Use a caption as transcript evidence only when hook context reports
 `caption_evidence=verified` together with a `receipt_id`, `caption_sha256`, and
@@ -70,10 +71,10 @@ hash in the receipt. A missing/mismatched adapter falls back to `yt-dlp`;
 runtime installation, proxy, cookie, login, or paid-provider work is forbidden.
 Translated tracks are reading aids only and are never transcript-eligible.
 
-When context reports `retry-scheduled`, recovery is automatic through the active
-foreground continuation; do not ask the user to repeat the prompt. The
-continuation respects `next_retry_at` and never bypasses its backoff. It remains
-ineligible for transcript claims until a verified receipt is available.
+When context reports `retry-scheduled`, the bounded foreground worker owns the
+retry; do not ask the user to repeat the prompt. It respects `next_retry_at` and
+never bypasses its backoff. It remains ineligible for transcript claims until a
+verified receipt is available.
 
 Receipt verification is only `evidence-ready`. Before declaring the knowledge
 task complete, write one receipt-bound `youtube-knowledge` artifact in the
