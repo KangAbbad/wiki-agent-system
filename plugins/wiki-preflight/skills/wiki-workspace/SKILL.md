@@ -42,9 +42,11 @@ required.
 The hook context is authoritative about caption eligibility only when it says
 `caption_evidence=verified` and provides `receipt_id`, `caption_sha256`, and
 receipt-bound files. Pass that receipt ID through the bundled canonicalization
-flow when creating evidence. Treat `stale-or-unreceipted`, `metadata-only`,
-`no-verified-caption`, and `machine-transcription` as ineligible for transcript
-facts, even when a file is present.
+flow when creating stronger caption evidence. Treat `stale-or-unreceipted`,
+`metadata-only`, `no-verified-caption`, and `machine-transcription` as
+ineligible for official transcript claims, even when a file is present. An
+acquired unreceipted source may still support a provisional synthesis when its
+actual provenance and confidence are stated.
 
 Caption transport failures are retried by the bounded foreground worker; do
 not ask the user to repeat the prompt. The worker honors `next_retry_at` and
@@ -64,16 +66,18 @@ tracks remain reading aids and are not transcript-eligible.
 
 Stop is capture/finalization only. It never executes or schedules caption retry
 and does not block `pending`, `running`, or `retryable` acquisition states.
-Receipt validity produces `evidence-ready` only; Stop may block that state until
-the current agent supplies the required artifact. It permits terminal `verified`
-only after exactly one `youtube-knowledge` artifact in Wiki `wiki/` binds the
-queue/source URLs, artifact hash, receipt IDs, every caption hash, and
-claim-to-evidence references, and passes
+`knowledge_readiness=ready` means acquired material is available for ordinary
+synthesis; `evidence_status=verified` remains a stronger optional claim label.
+Receipt validity and exactly one receipt-bound `youtube-knowledge` artifact in
+Wiki `wiki/` are required only for that stronger label. The artifact still
+binds the queue/source URLs, artifact hash, receipt IDs, every caption hash,
+claim-to-evidence references, and the
 `provenance_class=caption`, `evidence_status=verified`, `grounded=true`,
 `quality_status=verified`, `## Synthesis`, `## Sources`, and `## Quality` gates.
-Missing, stale, tampered, unrelated, or duplicate artifacts remain blocked.
-`exhausted` and `blocked` require an explicit sanitized terminal provenance
-report and never create transcript-backed or canonical knowledge.
+Missing, stale, tampered, unrelated, or duplicate artifacts leave ordinary
+knowledge usable with its declared provenance and do not block Stop. `exhausted`
+and `blocked` remain unready and never create transcript-backed or canonical
+knowledge.
 
 When that ingestion reaches a terminal non-transcript result and the task needs
 video detail, the agent may run the bundled local-STT fallback outside hook
@@ -83,7 +87,8 @@ canonical evidence. Never ask the user to run a command. If prerequisites are
 missing, report the bounded unavailable status and continue with the evidence
 class actually acquired.
 
-For every evidence-bearing result, report the source, provenance class,
+For every evidence-bearing result, report the source, `knowledge_readiness=ready`
+when material is acquired, provenance class,
 evidence lifecycle (`acquired`, `unverified`, `verifying`, `verified`,
 `exhausted`, or `blocked`), and confidence. Public vendor, database,
 documentation, and provenance verification remains agent-owned; continue the
@@ -97,9 +102,13 @@ Authority is never inferred from a prompt URL or words such as `docs`, `vendor`,
 or `official`. `verified` requires an explicit/trusted authority binding and a
 bounded claim-to-evidence match in the fetched page; host matching alone is
 insufficient. When direct evidence is absent or insufficient, the runtime uses
-the bounded public discovery ladder and keeps acquired pages `unverified` until
-both gates pass. Pending retryable records are drained by the scheduled bounded
-worker without requiring another user prompt.
+the bounded public discovery ladder and keeps acquired pages `unverified`; they
+remain ready for provenance-labeled ordinary use until both stronger gates pass.
+Pending retryable records are drained by the scheduled bounded worker without
+requiring another user prompt.
+
+Wiki lint is read-only in plugin workflows: use `llm-wiki lint` for inspection
+only and never `llm-wiki lint --fix`.
 
 ## Invariants
 

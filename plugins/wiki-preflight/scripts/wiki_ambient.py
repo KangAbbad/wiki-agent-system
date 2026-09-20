@@ -27,7 +27,7 @@ from youtube_fallback import (
     release_file_lock,
     validate_caption_receipt,
 )
-from evidence_verification import PROVENANCE_CLASSES, canonical_public_url, eligibility
+from evidence_verification import PROVENANCE_CLASSES, canonical_public_url, eligibility, knowledge_readiness
 from canonical_evidence import SHA256, canonical_source_path, render_canonical_source, source_slug
 
 
@@ -1061,6 +1061,7 @@ def canonicalize(cwd: str, source: str, source_url: str, title: str, receipt_id=
             ("content_sha256", digest),
             ("provenance_class", provenance_class),
             ("evidence_status", evidence_status),
+            ("knowledge_readiness", knowledge_readiness(provenance_class, evidence_status, True)),
             ("evidence_eligible", evidence_eligible),
             ("transcript_eligible", transcript_eligible),
         ]

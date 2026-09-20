@@ -55,12 +55,13 @@ bounded worker, including permitted retries, until terminal evidence or
 `exhausted`. No user-side command, repeated prompt, daemon, or scheduler is
 required.
 
-Use a caption as transcript evidence only when hook context reports
+Use a caption as official transcript evidence only when hook context reports
 `caption_evidence=verified` together with a `receipt_id`, `caption_sha256`, and
 receipt-bound file list. Stale or unreceipted captions, `metadata-only`, and
-`machine-transcription` are explicitly ineligible for transcript facts; use the
-receipt ID for the canonicalization gate rather than inferring freshness from a
-path or timestamp.
+`machine-transcription` are ineligible for that stronger claim; an acquired
+unreceipted source may still support a provisional synthesis when its actual
+provenance and confidence are stated. Use the receipt ID for the stronger
+canonicalization gate rather than inferring freshness from a path or timestamp.
 
 The bundled caption helper may use the vendored
 `youtube-transcript-api==1.2.4` adapter and its pinned pure-Python dependencies
@@ -76,16 +77,19 @@ retry; do not ask the user to repeat the prompt. It respects `next_retry_at` and
 never bypasses its backoff. It remains ineligible for transcript claims until a
 verified receipt is available.
 
-Receipt verification is only `evidence-ready`. Before declaring the knowledge
-task complete, write one receipt-bound `youtube-knowledge` artifact in the
-workspace Wiki `wiki/` area. Bind its artifact hash, queue/source URLs, receipt
-IDs, every caption hash, and claim-to-evidence references; mark
+Acquired source material is `knowledge_readiness=ready` for ordinary agent use;
+`evidence_status=verified` is a stronger claim-quality signal. Receipt
+verification and one receipt-bound `youtube-knowledge` artifact in the
+workspace Wiki `wiki/` area are required only before declaring that stronger
+label. Bind its artifact hash, queue/source URLs, receipt IDs, every caption
+hash, and claim-to-evidence references; mark
 `provenance_class=caption`, `evidence_status=verified`, `grounded=true`, and
 `quality_status=verified`. Include `## Synthesis`, `## Sources`, and `## Quality`
 sections, with the receipt IDs, hashes, and source URLs in the grounded
-synthesis. Missing or duplicate artifacts keep Stop blocked.
+synthesis. Missing or duplicate artifacts do not block ordinary ready knowledge.
 
-Report each acquired source with its provenance class (`caption`,
+Report `knowledge_readiness=ready` for acquired material, then state its
+provenance class (`caption`,
 `web-extraction`, `metadata`, `machine-transcription`, or `none`), evidence
 lifecycle, and confidence. Public vendor, database, documentation, and
 provenance verification is agent-owned: continue bounded lookup/retry and
@@ -99,9 +103,13 @@ For public evidence, never infer authority from the URL host or prompt wording.
 Require an explicit/trusted authority binding and validate that the page content
 supports the claim before saying `verified`; host equality alone is insufficient.
 If direct evidence is absent or insufficient, use the bounded discovery ladder
-and persist acquired pages as `unverified` until both gates pass. Durable pending
+and persist acquired pages as `unverified`; acquired pages remain ready for
+provenance-labeled ordinary use until both stronger gates pass. Durable pending
 and retryable records are drained by the scheduled bounded worker, not by asking
 the user to repeat the prompt.
+
+Wiki lint is read-only in plugin workflows: use `llm-wiki lint` for inspection
+only and never `llm-wiki lint --fix`.
 
 ## Invariants
 

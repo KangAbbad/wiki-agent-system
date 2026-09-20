@@ -53,6 +53,7 @@ semantic_and_evidence() (
   grep -q '^source: "https://example.test/spec"$' "$raw"
   grep -q '^ingested: ' "$raw"
   grep -q '^summary: "Wiki Preflight web-extraction evidence; lifecycle=unverified\."$' "$raw"
+  grep -q '^knowledge_readiness: ready$' "$raw"
   grep -q '^tags: \[wiki-preflight, evidence, web-extraction\]$' "$raw"
   grep -q 'content_sha256:' "$raw"
   grep -q '^status: canonical$' "$raw"

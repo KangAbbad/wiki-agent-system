@@ -57,6 +57,7 @@ case "$stable_raw" in
   *) exit 1 ;;
 esac
 grep -q '^type: articles$' "$stable_raw"
+grep -q '^knowledge_readiness: ready$' "$stable_raw"
 
 durable_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable-durable","turn_id":"one","prompt":"Research and synthesize the cache-free runtime result"}' "$workspace")
 printf '%s' "$durable_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >/dev/null

@@ -544,6 +544,25 @@ def queue_timestamp(value, required=True):
     return isinstance(value, str) and 1 <= len(value) <= 40 and "\n" not in value and "\r" not in value
 
 
+def acquired_caption_files(wiki, files):
+    if not isinstance(files, list) or not files:
+        return False
+    if wiki is None:
+        return True
+    directory = Path(wiki) / "inbox" / "youtube"
+    try:
+        return all(
+            isinstance(name, str)
+            and Path(name).name == name
+            and not (directory / name).is_symlink()
+            and (directory / name).is_file()
+            and (directory / name).stat().st_size > 0
+            for name in files
+        )
+    except OSError:
+        return False
+
+
 def queue_item_contract_defaults(item, wiki=None):
     status = item.get("status")
     receipt = item.get("receipt")
@@ -567,13 +586,15 @@ def queue_item_contract_defaults(item, wiki=None):
     receipt_files = [PurePosixPath(entry["path"]).name for entry in receipt.get("files", [])] if receipt_valid else []
     files = item.get("files") if isinstance(item.get("files"), list) else []
     files_match_receipt = files == receipt_files
+    legacy_unreceipted = status == "ok" and receipt is None and acquired_caption_files(wiki, files)
     caption_valid = receipt_valid and files_match_receipt
+    caption_acquired = caption_valid or legacy_unreceipted
     metadata_state = item.get("metadata_state")
     if metadata_state not in {"absent", "acquired"}:
         metadata_state = "acquired" if isinstance(item.get("metadata"), dict) else "absent"
-    provenance_class = "caption" if caption_valid else "metadata" if metadata_state == "acquired" else "none"
-    evidence_eligible = caption_valid or metadata_state == "acquired"
-    transcript_eligible = caption_valid and not bool(receipt and receipt.get("translated_from"))
+    provenance_class = "caption" if caption_acquired else "metadata" if metadata_state == "acquired" else "none"
+    evidence_eligible = caption_acquired or metadata_state == "acquired"
+    transcript_eligible = caption_acquired and not bool(receipt and receipt.get("translated_from"))
     caption_state = item.get("caption_state")
     if caption_state not in {"pending", "running", "retryable", "verified", "no-captions", "exhausted", "blocked"}:
         caption_state = {
@@ -605,7 +626,7 @@ def queue_item_contract_defaults(item, wiki=None):
         "metadata_state": metadata_state,
         "next_retry_at": item.get("next_retry_at"),
     }
-    if status == "ok" and not caption_valid:
+    if status == "ok" and not caption_acquired:
         defaults["files"] = []
         defaults["receipt"] = None
     changed = False

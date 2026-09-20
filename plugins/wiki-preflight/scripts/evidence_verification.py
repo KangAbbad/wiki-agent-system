@@ -39,6 +39,7 @@ QUEUE_DIRNAME = "evidence-verification"
 QUEUE_ID = re.compile(r"^[0-9a-f]{32}$")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 EVIDENCE_STATES = frozenset({"acquired", "unverified", "verifying", "verified", "exhausted", "blocked"})
+KNOWLEDGE_READY_STATES = frozenset({"acquired", "unverified", "verifying", "verified"})
 QUEUE_STATES = frozenset({"pending", "running", "verified", "exhausted", "blocked"})
 MAX_CLAIM_CHARS = 400
 MAX_RESULT_CHARS = 400
@@ -124,6 +125,15 @@ def eligibility(provenance_class, evidence_status):
     if provenance_class in {"web-extraction", "metadata"}:
         return evidence_status in {"acquired", "unverified", "verifying", "verified"}, False
     return False, False
+
+
+def knowledge_readiness(provenance_class, evidence_status, source_acquired=False):
+    """Return readiness independently from stronger claim eligibility."""
+    if provenance_class not in PROVENANCE_CLASSES or evidence_status not in EVIDENCE_STATES:
+        raise VerificationError("knowledge provenance or lifecycle is invalid")
+    if type(source_acquired) is not bool:
+        raise VerificationError("knowledge acquisition flag is invalid")
+    return "ready" if source_acquired and provenance_class != "none" and evidence_status in KNOWLEDGE_READY_STATES else "unready"
 
 
 class VerificationError(ValueError):
@@ -577,6 +587,7 @@ def persist_web_source(wiki, source_url, body, retrieved_at, *, evidence_status=
             ("content_sha256", digest),
             ("provenance_class", "web-extraction"),
             ("evidence_status", evidence_status),
+            ("knowledge_readiness", knowledge_readiness("web-extraction", evidence_status, True)),
             ("evidence_eligible", True),
             ("transcript_eligible", False),
             ("verification_authority", authority),
@@ -1275,6 +1286,18 @@ def context_for_item(wiki, item):
         f"provenance={item.get('provenance_class', 'none')}",
         f"evidence={'eligible' if item.get('evidence_eligible') else 'ineligible'}",
     ]
+    try:
+        source_acquired = bool(item.get("source_path"))
+        fields.append(
+            "knowledge_readiness="
+            + knowledge_readiness(
+                item.get("provenance_class", "none"),
+                item.get("evidence_status", "unverified"),
+                source_acquired,
+            )
+        )
+    except VerificationError:
+        fields.append("knowledge_readiness=unready")
     if item.get("content_sha256"):
         fields.append(f"content_sha256={item['content_sha256']}")
     if item.get("evidence_source_url"):
@@ -1314,7 +1337,7 @@ def preflight_context(wiki, prompt, deadline=6.0):
             else:
                 lines.append(f"- source={safe_text(source_url, 160)}; status={snapshot.get('status', 'unavailable')}; evidence_status=unverified")
         except (OSError, VerificationError) as error:
-            lines.append(f"- source={safe_text(source_url, 160)}; status=unverified; evidence_status=unverified; retry=durable; reason={safe_text(str(error), 120)}")
+            lines.append(f"- source={safe_text(source_url, 160)}; status=unverified; evidence_status=unverified; knowledge_readiness=unready; retry=durable; reason={safe_text(str(error), 120)}")
     if len(items) > 2:
         lines.append(f"- queued={len(items) - 2} additional public source(s); automatic retry remains agent-owned.")
     lines.append("Public-source gaps must be reported as unverified, exhausted, or blocked; do not delegate routine verification to the user.")

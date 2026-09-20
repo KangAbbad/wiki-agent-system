@@ -54,6 +54,8 @@ grep -q 'knowledge artifacts in `.wiki/`' "$policy"
 grep -q 'explicit product/developer documentation' "$policy"
 grep -q 'Public vendor, database' "$policy"
 grep -q 'evidence lifecycle' "$policy"
+grep -q 'knowledge_readiness=ready' "$policy"
+grep -q 'never run `llm-wiki lint --fix`' "$policy"
 grep -q 'routine user task' "$policy"
 ! grep -q 'run.*semantic finalizer\|python3.*wiki_ambient.py' "$policy"
 

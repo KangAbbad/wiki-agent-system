@@ -19,6 +19,7 @@ UNQUOTED_FIELDS = {
     "transcript_sha256",
     "provenance_class",
     "evidence_status",
+    "knowledge_readiness",
     "evidence_eligible",
     "transcript_eligible",
     "receipt_id",

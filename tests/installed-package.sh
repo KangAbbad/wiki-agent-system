@@ -50,6 +50,7 @@ case "$installed_raw" in
   *) exit 1 ;;
 esac
 grep -q '^type: articles$' "$installed_raw"
+grep -q '^knowledge_readiness: ready$' "$installed_raw"
 
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize the installed runtime result\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed durable installed verification\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null

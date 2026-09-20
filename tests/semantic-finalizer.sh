@@ -250,7 +250,8 @@ report = {
     "turn_id": "controller-turn",
     "last_assistant_message": "still finalizing",
 }
-assert module.stop_foreground_gate(wiki, report)["block"] is True
+assert module.stop_foreground_gate(wiki, report)["block"] is False
+assert module.stop_foreground_gate(wiki, report)["capture"] is False
 report["last_assistant_message"] = "status: exhausted; provenance: metadata; transcript: not-available"
 assert module.stop_foreground_gate(wiki, report)["capture"] is True
 

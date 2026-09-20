@@ -111,6 +111,7 @@ case "$canonical_raw" in
   *) fail "marketplace canonical writer did not emit raw/articles" ;;
 esac
 grep -q '^type: articles$' "$canonical_raw" || fail "marketplace canonical writer emitted the wrong type"
+grep -q '^knowledge_readiness: ready$' "$canonical_raw" || fail "marketplace canonical writer omitted readiness"
 grep -q '^source: "https://example.test/marketplace"$' "$canonical_raw" || fail "marketplace canonical writer omitted source"
 test -z "$(find "$canonical_workspace/.wiki/raw" -maxdepth 1 -type f -name '*.md' ! -name '_index.md' -print)" || fail "marketplace canonical writer left a direct raw record"
 

@@ -567,6 +567,112 @@ printf '%s' "$stale_context_output" | grep -q 'caption_evidence=ineligible; reas
 printf '%s' "$stale_context_output" | grep -q 'transcript=not-available'
 printf '%s' "$stale_context_output" | grep -q 'stale/unreceipted captions'
 
+unreceipted_workspace="$test_root/unreceipted-workspace"
+mkdir -p "$unreceipted_workspace/.wiki/raw" "$unreceipted_workspace/.wiki/wiki" "$unreceipted_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$unreceipted_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$unreceipted_workspace/.wiki/_index.md"
+unreceipted_url='https://www.youtube.com/watch?v=62qCljKilH8'
+unreceipted_queue=$($launcher "$script" queue --workspace "$unreceipted_workspace" --session-id unreceipted --turn-id one "$unreceipted_url")
+unreceipted_queue_id=$(printf '%s' "$unreceipted_queue" | python3 -c 'import json,sys; print(json.load(sys.stdin)["queue_id"])')
+unreceipted_record=$(find "$unreceipted_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
+python3 - "$unreceipted_record" "$unreceipted_workspace" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+queue_path, workspace = map(Path, sys.argv[1:])
+data = json.loads(queue_path.read_text())
+item = data["items"][0]
+caption = workspace / ".wiki" / "inbox" / "youtube" / "62qCljKilH8.vtt"
+caption.parent.mkdir(parents=True, exist_ok=True)
+caption.write_text("WEBVTT\n\n00:00.000 --> 00:01.000\nunreceipted fixture caption\n")
+now = datetime.now(timezone.utc).isoformat()
+item.update({
+    "status": "ok",
+    "attempt": 1,
+    "terminal_at": now,
+    "helper_status": "legacy-unreceipted",
+    "files": [caption.name],
+    "provenance_class": "caption",
+    "evidence_eligible": True,
+    "transcript_eligible": True,
+    "evidence_reason": "caption-receipt-missing",
+    "attempts": [],
+    "metadata": None,
+    "receipt": None,
+    "caption_state": "verified",
+    "metadata_state": "absent",
+    "next_retry_at": None,
+})
+data["updated_at"] = now
+queue_path.write_text(json.dumps(data, sort_keys=True) + "\n")
+PY
+unreceipted_output=$(printf '%s' "{\"cwd\":\"$unreceipted_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"unreceipted\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize video $unreceipted_url\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+printf '%s' "$unreceipted_output" | grep -q 'status=ok; provenance=caption; evidence=unreceipted-or-invalid; evidence_status=unverified; knowledge_readiness=ready'
+printf '%s' "$unreceipted_output" | grep -q 'stale_caption_files=62qCljKilH8.vtt'
+printf '%s' "$unreceipted_output" | grep -q 'Knowledge readiness is complete for ordinary synthesis'
+! printf '%s' "$unreceipted_output" | grep -q 'caption_evidence=verified'
+unreceipted_stop=$(printf '%s' "{\"cwd\":\"$unreceipted_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"unreceipted\",\"turn_id\":\"one\",\"last_assistant_message\":\"Unverified caption material was used with provenance and confidence.\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+! printf '%s' "$unreceipted_stop" | grep -q '"decision": "block"'
+test "$(find "$unreceipted_workspace/.wiki/inbox/autosave" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 1
+
+failure_blocked_workspace="$test_root/failure-blocked-workspace"
+mkdir -p "$failure_blocked_workspace/.wiki/raw" "$failure_blocked_workspace/.wiki/wiki" "$failure_blocked_workspace/.wiki/inbox"
+printf '%s\n' '# Workspace Wiki' >"$failure_blocked_workspace/.wiki/config.md"
+printf '%s\n' '# Workspace Wiki' >"$failure_blocked_workspace/.wiki/_index.md"
+blocked_url='https://www.youtube.com/watch?v=S78sl3d8D1I'
+failure_url='https://www.youtube.com/watch?v=DEG-k0r9C2E'
+failure_blocked_queue=$($launcher "$script" queue --workspace "$failure_blocked_workspace" --session-id failure-blocked --turn-id one "$blocked_url" "$failure_url")
+failure_blocked_record=$(find "$failure_blocked_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
+python3 - "$failure_blocked_record" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+now = datetime.now(timezone.utc).isoformat()
+for item in data["items"]:
+    blocked = item["video_id"] == "S78sl3d8D1I"
+    item.update({
+        "status": "blocked" if blocked else "error",
+        "attempt": 1,
+        "terminal_at": now,
+        "helper_status": "blocked" if blocked else "error",
+        "error_class": "access-boundary" if blocked else "caption-route-failed",
+        "files": [],
+        "provenance_class": "none",
+        "evidence_eligible": False,
+        "transcript_eligible": False,
+        "evidence_reason": "access-boundary" if blocked else "caption-route-failed",
+        "attempts": [],
+        "metadata": None,
+        "receipt": None,
+        "caption_state": "blocked" if blocked else "exhausted",
+        "metadata_state": "absent",
+        "next_retry_at": None,
+    })
+data["updated_at"] = now
+path.write_text(json.dumps(data, sort_keys=True) + "\n")
+PY
+failure_blocked_output=$(printf '%s' "{\"cwd\":\"$failure_blocked_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"failure-blocked\",\"turn_id\":\"one\",\"prompt\":\"Riset video $blocked_url dan $failure_url\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+printf '%s' "$failure_blocked_output" | grep -q 'status=blocked; provenance=none; evidence=none; evidence_status=blocked; knowledge_readiness=unready'
+printf '%s' "$failure_blocked_output" | grep -q 'status=error; provenance=none; evidence=none; evidence_status=exhausted; knowledge_readiness=unready'
+printf '%s' "$failure_blocked_output" | grep -q 'knowledge_readiness=unready; no acquired source material is available'
+! printf '%s' "$failure_blocked_output" | grep -q 'knowledge_readiness=ready'
+failure_blocked_stop=$(printf '%s' "{\"cwd\":\"$failure_blocked_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"failure-blocked\",\"turn_id\":\"one\",\"last_assistant_message\":\"Acquisition failed or was blocked; no source material was used.\"}" \
+  | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
+! printf '%s' "$failure_blocked_stop" | grep -q '"decision": "block"'
+if test -d "$failure_blocked_workspace/.wiki/inbox/autosave"; then
+  test "$(find "$failure_blocked_workspace/.wiki/inbox/autosave" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 0
+fi
+test -z "$(find "$failure_blocked_workspace/.wiki/wiki" -type f -print -quit)"
+
 hook_workspace="$test_root/hook-workspace"
 hook_log="$test_root/hook-fetches.log"
 mkdir -p "$hook_workspace/.wiki/raw" "$hook_workspace/.wiki/wiki" "$hook_workspace/.wiki/inbox"
@@ -605,9 +711,8 @@ PY
 test "$(wc -l <"$hook_log" | tr -d ' ')" -eq 4
 blocked_stop=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"last_assistant_message\":\"Still collecting video evidence\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
-printf '%s' "$blocked_stop" | grep -q '"decision": "block"'
-blocked_reason=$(printf '%s' "$blocked_stop" | python3 -c 'import json,sys; print(json.load(sys.stdin)["reason"])')
-! printf '%s' "$blocked_reason" | grep -Eq 'queue_id|revision=|loop=|/wiki-agent-system|simulated yt-dlp failure'
+! printf '%s' "$blocked_stop" | grep -q '"decision": "block"'
+! printf '%s' "$blocked_stop" | grep -Eq 'queue_id|revision=|loop=|/wiki-agent-system|simulated yt-dlp failure|retry|verify|authority'
 python3 - "$hook_workspace" "$queue_record" <<'PY'
 import hashlib
 import json

@@ -6,10 +6,15 @@ sys.dont_write_bytecode = True
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from wiki_ambient import capture, capture_intent, capture_key, parse_capture_message, redact, retrieve_memory
-from evidence_verification import drain_due_queue as drain_public_verification_queue, preflight_context as public_verification_context
+from evidence_verification import (
+    drain_due_queue as drain_public_verification_queue,
+    knowledge_readiness,
+    preflight_context as public_verification_context,
+)
 from youtube_fallback import (
     QueueError,
     acquire_file_lock,
+    acquired_caption_files,
     atomic_queue_write,
     canonical_video,
     drain_queue,
@@ -42,19 +47,19 @@ YOUTUBE_HOOK_BUDGET = 40
 FOREGROUND_LOOP_CAP = 4
 FOREGROUND_STATE_DIRNAME = "foreground-loops"
 FOREGROUND_LOCK_TIMEOUT = 0.5
-FOREGROUND_STATES = frozenset({"pending", "running", "retryable", "evidence-ready", "verified", "exhausted", "blocked"})
+FOREGROUND_STATES = frozenset({"pending", "running", "retryable", "ready", "evidence-ready", "verified", "exhausted", "blocked"})
 FOREGROUND_ACTIONS = frozenset({"caption-attempt", "caption-retry", "knowledge-synthesis", "terminal-caption-result"})
-FOREGROUND_TERMINAL_STATES = frozenset({"verified", "exhausted", "blocked"})
+FOREGROUND_TERMINAL_STATES = frozenset({"ready", "verified", "exhausted", "blocked"})
 KNOWLEDGE_ARTIFACT_SCHEMA_VERSION = 1
 KNOWLEDGE_ARTIFACT_MAX_FILES = 100
 KNOWLEDGE_ARTIFACT_MAX_BYTES = 256 * 1024
 KNOWLEDGE_ARTIFACT_HASH = re.compile(r"^[0-9a-f]{64}$")
 TERMINAL_REPORT_PATTERN = re.compile(
-    r"\b(?:status|state)\s*[:=]\s*(?:exhausted|blocked)\b.*\bprovenance\s*[:=]\s*[a-z-]+.*\b(?:transcript[_ -]?eligible|transcript)\s*[:=]\s*(?:false|no|not-available)",
+    r"\b(?:status|state)\s*[:=]\s*(?:exhausted|blocked)\b.*\bprovenance\s*[:=]\s*[a-z-]+.*\b(?:transcript[_ -]?eligible|transcript)\s*[:=]\s*(?:false|no|not-available|not-verified)",
     re.I | re.S,
 )
 TRANSCRIPT_CLAIM_PATTERN = re.compile(
-    r"\b(?:transcript[- ]backed|canonical knowledge|caption evidence\s*=\s*verified)\b",
+    r"\b(?:transcript[- ]backed|canonical knowledge|official caption|verified caption|official transcript|verified transcript|caption evidence\s*=\s*verified)\b",
     re.I,
 )
 
@@ -570,6 +575,31 @@ def evidence_context(wiki, item):
     return "caption_evidence=ineligible; reason=no-verified-caption; receipt=missing-or-invalid", "none"
 
 
+def foreground_knowledge_status(wiki, item):
+    """Classify acquired material without upgrading its evidence claim."""
+    provenance = item.get("provenance_class", "none")
+    files = item.get("files") if isinstance(item.get("files"), list) else []
+    if provenance == "metadata":
+        source_acquired = item.get("metadata_state") == "acquired" and isinstance(item.get("metadata"), dict)
+    else:
+        source_acquired = provenance != "none" and acquired_caption_files(wiki, files)
+    if verified_caption_receipt(wiki, item):
+        evidence_status = "verified"
+    elif source_acquired:
+        evidence_status = "unverified"
+    elif item.get("status") in {"blocked", "blocked-install"}:
+        evidence_status = "blocked"
+    elif item.get("status") in {"exhausted", "error", "no-captions"}:
+        evidence_status = "exhausted"
+    else:
+        evidence_status = "verifying"
+    try:
+        readiness = knowledge_readiness(provenance, evidence_status, source_acquired)
+    except (TypeError, ValueError):
+        readiness = "unready"
+    return readiness, evidence_status
+
+
 def _knowledge_frontmatter(content):
     if not content.startswith("---\n"):
         return None, None
@@ -741,10 +771,12 @@ def foreground_outcome(wiki, snapshot):
         return "pending", "caption evidence pending"
     if "retryable" in statuses:
         return "retryable", "caption retry pending"
+    if all(item.get("status") == "ok" and verified_caption_receipt(wiki, item) for item in records):
+        return "evidence-ready", "caption evidence verified; stronger artifact optional"
+    if any(foreground_knowledge_status(wiki, item)[0] == "ready" for item in records):
+        return "ready", "source material acquired; stronger evidence remains separate"
     if statuses & {"blocked", "blocked-install"}:
         return "blocked", "caption access boundary blocked"
-    if all(item.get("status") == "ok" and verified_caption_receipt(wiki, item) for item in records):
-        return "evidence-ready", "caption evidence verified; knowledge artifact required"
     return "exhausted", "caption queue exhausted"
 
 
@@ -773,10 +805,12 @@ def foreground_context(root, snapshot, controller, urls):
             files = item.get("files") if isinstance(item.get("files"), list) else []
             provenance = safe_text(str(item.get("provenance_class") or "none"), 40)
             evidence_detail, evidence = evidence_context(root, item)
+            readiness, evidence_status = foreground_knowledge_status(root, item)
             transcript = "eligible" if evidence == "eligible" else "not-available"
             lines.append(
                 f"- {item['url']}: status={item['status']}; provenance={provenance}; "
-                f"evidence={evidence}; transcript={transcript}; files={len(files)}"
+                f"evidence={evidence}; evidence_status={evidence_status}; "
+                f"knowledge_readiness={readiness}; transcript={transcript}; files={len(files)}"
             )
             lines.append(f"  {evidence_detail}")
             if files and evidence == "eligible":
@@ -792,20 +826,28 @@ def foreground_context(root, snapshot, controller, urls):
             if evidence == "exhausted":
                 lines.append("  retry=automatic cap reached; transcript evidence remains unavailable")
             if transcript == "not-available":
-                lines.append("  transcript=not-available; stale/unreceipted captions, metadata-only, and machine-transcription cannot support transcript claims")
+                lines.append("  transcript=not-verified; unreceipted or translated material may inform only provenance-labeled synthesis, not official-caption claims")
         if all(item.get("status") == "ok" and verified_caption_receipt(root, item) for item in snapshot["records"]):
             artifact_status, _, _ = knowledge_artifact_snapshot(root, controller["queue_id"], snapshot)
-            lines.append(f"- knowledge: artifact={artifact_status}; provenance=caption; quality={'verified' if artifact_status == 'verified' else 'required'}")
+            lines.append(f"- knowledge: knowledge_readiness=ready; evidence_status=verified; stronger_artifact={artifact_status}")
             if artifact_status != "verified":
-                lines.append("  knowledge=artifact-required; finish the receipt-bound synthesis before completion")
+                lines.append("  stronger_verification=optional; a receipt-bound artifact upgrades the claim label to verified")
+        else:
+            ready_count = sum(foreground_knowledge_status(root, item)[0] == "ready" for item in snapshot["records"])
+            if ready_count:
+                lines.append(f"- knowledge: knowledge_readiness=ready; acquired_sources={ready_count}; evidence_status remains separate")
+            else:
+                lines.append("- knowledge: knowledge_readiness=unready; no acquired source material is available")
         if len(urls) > 1:
             lines.append(f"- queue: terminal={snapshot['terminal']}; pending={snapshot['pending']}.")
     lines.append(f"- acquisition: state={controller['state']}")
-    lines.append("Transcript evidence requires caption_evidence=verified with receipt_id and caption_sha256; stale/unreceipted captions, metadata-only, and machine-transcription are ineligible for transcript facts.")
+    lines.append("Receipt-bound caption evidence supports stronger transcript claims; unverified acquired material remains usable only with its declared provenance and confidence.")
     if controller["state"] == "evidence-ready":
-        lines.append("Knowledge completion requires one receipt-bound, hash-bound, grounded artifact with verified provenance and quality sections before Stop can finish.")
+        lines.append("Knowledge readiness is complete for ordinary synthesis; the receipt-bound artifact is optional unless the stronger verified label is claimed.")
     if controller["state"] == "verified":
-        lines.append("Knowledge artifact finalization gate: verified.")
+        lines.append("Knowledge artifact quality: verified.")
+    if controller["state"] == "ready":
+        lines.append("Knowledge readiness is complete for ordinary synthesis; evidence status calibrates claim strength separately.")
     return "\n".join(lines)
 
 
@@ -831,7 +873,7 @@ def advance_foreground_controller(root, cwd, prompt, payload):
             return foreground_context(root, snapshot, controller, urls)
         snapshot = queue_snapshot(root, queue_id)
         if controller["state"] == "evidence-ready":
-            artifact_status, _, artifact_reason = knowledge_artifact_snapshot(root, queue_id, snapshot)
+            artifact_status, _, _ = knowledge_artifact_snapshot(root, queue_id, snapshot)
             if artifact_status == "verified":
                 updated, next_controller, _ = update_foreground_controller(
                     root,
@@ -843,20 +885,8 @@ def advance_foreground_controller(root, cwd, prompt, payload):
                 )
                 controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
                 return foreground_context(root, snapshot, controller, urls)
-            loop_count = controller["loop_count"] + 1
-            state = "exhausted" if loop_count >= FOREGROUND_LOOP_CAP else "evidence-ready"
-            action = "terminal-caption-result" if state == "exhausted" else "knowledge-synthesis"
-            reason = "knowledge artifact gate exhausted" if state == "exhausted" else safe_text(artifact_reason or "knowledge artifact required", 160)
-            updated, next_controller, _ = update_foreground_controller(
-                root,
-                queue_id,
-                controller["revision"],
-                state=state,
-                action=action,
-                loop_count=loop_count,
-                reason=reason,
-            )
-            controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
+            # Ordinary knowledge is already ready; only a supplied artifact can
+            # upgrade the stronger receipt-bound label to verified.
             return foreground_context(root, snapshot, controller, urls)
         now = time.time()
         hook_deadline = time.monotonic() + min(YOUTUBE_HOOK_BUDGET, max(1, controller["deadline_at"] - now))
@@ -948,6 +978,11 @@ def terminal_report_is_safe(payload, controller):
     return bool(TERMINAL_REPORT_PATTERN.search(message)) and controller["state"] in {"exhausted", "blocked"}
 
 
+def ordinary_knowledge_report_is_safe(payload):
+    message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
+    return isinstance(message, str) and not TRANSCRIPT_CLAIM_PATTERN.search(redact(message).strip())
+
+
 def discard_finalizer_state(root, payload):
     state_path = finalizer_state(root, payload)
     if state_path is None:
@@ -978,24 +1013,8 @@ def stop_foreground_gate(root, payload):
         return None
     snapshot = queue_snapshot(root, queue_id)
     if controller["state"] in {"evidence-ready", "verified"}:
-        artifact_status, _, artifact_reason = knowledge_artifact_snapshot(root, queue_id, snapshot)
-        if artifact_status != "verified":
-            if controller["state"] == "verified":
-                updated, next_controller, _ = update_foreground_controller(
-                    root,
-                    queue_id,
-                    controller["revision"],
-                    state="evidence-ready",
-                    action="knowledge-synthesis",
-                    reason="knowledge artifact invalidated",
-                )
-                controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
-            return {
-                "block": True,
-                "reason": "Caption evidence is ready; finish the receipt-bound knowledge artifact before completing.",
-                "capture": False,
-            }
-        if controller["state"] == "evidence-ready":
+        artifact_status, _, _ = knowledge_artifact_snapshot(root, queue_id, snapshot)
+        if artifact_status == "verified" and controller["state"] == "evidence-ready":
             updated, next_controller, _ = update_foreground_controller(
                 root,
                 queue_id,
@@ -1005,6 +1024,19 @@ def stop_foreground_gate(root, payload):
                 reason="knowledge artifact finalized",
             )
             controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
+        elif artifact_status != "verified" and controller["state"] == "verified":
+            updated, next_controller, _ = update_foreground_controller(
+                root,
+                queue_id,
+                controller["revision"],
+                state="evidence-ready",
+                action="knowledge-synthesis",
+                reason="knowledge artifact invalidated",
+            )
+            controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
+        if artifact_status != "verified" and not ordinary_knowledge_report_is_safe(payload):
+            discard_finalizer_state(root, payload)
+            return {"block": False, "reason": "", "capture": False}
     if controller["state"] not in FOREGROUND_TERMINAL_STATES:
         return {
             "block": False,
@@ -1015,22 +1047,8 @@ def stop_foreground_gate(root, payload):
         if any(item.get("status") in {"pending", "running", "retryable"} for item in snapshot.get("records", [])):
             return {"block": False, "reason": "", "capture": True}
     if controller["state"] in {"exhausted", "blocked"} and not terminal_report_is_safe(payload, controller):
-        if controller["report_attempts"] == 0:
-            _, updated, _ = update_foreground_controller(
-                root,
-                queue_id,
-                controller["revision"],
-                reason="terminal provenance report required",
-                report_attempts=1,
-            )
-            revision = updated["revision"] if updated else controller["revision"]
-            return {
-                "block": True,
-                "reason": "A terminal YouTube evidence result needs a sanitized provenance report before completion.",
-                "capture": False,
-            }
         discard_finalizer_state(root, payload)
-        return {"block": False, "reason": "terminal provenance report missing; semantic capture suppressed", "capture": False}
+        return {"block": False, "reason": "", "capture": False}
     return {"block": False, "reason": "", "capture": True}
 
 

@@ -84,7 +84,7 @@ payload = {
     "last_assistant_message": "still synthesizing",
 }
 gate = module.stop_foreground_gate(wiki, payload)
-assert gate["block"] is True and gate["capture"] is False, gate
+assert gate["block"] is False and gate["capture"] is True, gate
 
 body = f"""## Synthesis
 
@@ -132,14 +132,13 @@ assert module.read_foreground_controller(wiki, queue_id)[1]["state"] == "verifie
 duplicate = wiki / "wiki" / "duplicate.md"
 duplicate.write_text(artifact.read_text().replace("artifact_path: wiki/knowledge.md", "artifact_path: wiki/duplicate.md"))
 gate = module.stop_foreground_gate(wiki, payload)
-assert gate["block"] is True and gate["capture"] is False, gate
+assert gate["block"] is False and gate["capture"] is True, gate
 assert module.read_foreground_controller(wiki, queue_id)[1]["state"] == "evidence-ready"
 duplicate.unlink()
 
 artifact.write_text(artifact.read_text().replace("Grounded claim mapping", "Tampered claim mapping"))
 gate = module.stop_foreground_gate(wiki, payload)
-assert gate["block"] is True and gate["capture"] is False, gate
-assert gate["reason"] == "Caption evidence is ready; finish the receipt-bound knowledge artifact before completing."
+assert gate["block"] is False and gate["capture"] is True, gate
 
 retry_id = module.queue_id_for("backoff-session", "backoff-turn")
 retry_url = "https://youtu.be/9bZkp7q19f0"

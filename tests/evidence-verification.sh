@@ -118,6 +118,7 @@ assert unverified["item"]["status"] == "exhausted"
 assert unverified["item"]["evidence_status"] == "unverified"
 assert unverified["item"]["provenance_class"] == "web-extraction"
 assert unverified["item"]["error_class"] == "authority-binding-required"
+assert "knowledge_readiness=ready" in module.context_for_item(wiki, unverified["item"])
 unverified_path = wiki / ".sessions" / "wiki-agent-system" / module.QUEUE_DIRNAME / f"{unverified_id}.json"
 unverified_data = json.loads(unverified_path.read_text())
 unverified_data["items"][0]["next_retry_at"] = 0
@@ -177,6 +178,13 @@ assert module.eligibility("web-extraction", "unverified") == (True, False)
 assert module.eligibility("metadata", "verified") == (True, False)
 assert module.eligibility("machine-transcription", "verified") == (False, False)
 assert module.eligibility("none", "unverified") == (False, False)
+assert module.knowledge_readiness("caption", "unverified") == "unready"
+assert module.knowledge_readiness("web-extraction", "unverified") == "unready"
+assert module.knowledge_readiness("caption", "unverified", True) == "ready"
+assert module.knowledge_readiness("caption", "unverified", False) == "unready"
+assert module.knowledge_readiness("web-extraction", "unverified", True) == "ready"
+assert module.knowledge_readiness("web-extraction", "exhausted", True) == "unready"
+assert module.knowledge_readiness("none", "unverified", True) == "unready"
 print("generic evidence lifecycle passed")
 PY
 
@@ -194,6 +202,7 @@ raw=$(find "$workspace/.wiki/raw/articles" -type f -name 'extracted-public-page-
 grep -q '^retrieval_method: public-http$' "$raw"
 grep -q '^provenance_class: web-extraction$' "$raw"
 grep -q '^evidence_status: unverified$' "$raw"
+grep -q '^knowledge_readiness: ready$' "$raw"
 grep -q '^evidence_eligible: true$' "$raw"
 grep -q '^transcript_eligible: false$' "$raw"
 

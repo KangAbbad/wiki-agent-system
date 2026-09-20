@@ -58,23 +58,33 @@ file paths into the agent context, so a missing transcript is not treated as
 the end of extraction. A caption is transcript evidence in that context only
 when it is shown as `caption_evidence=verified` with its `receipt_id`,
 `caption_sha256`, and receipt-bound file list. A path without that verified
-receipt is reported as stale/unreceipted and must not be used for transcript
-claims.
+receipt is reported as stale/unreceipted. It may inform a provisional
+synthesis only with its actual provenance and confidence; it must not be
+presented as an official caption or verified transcript.
 
 Every helper and queue result carries the canonical URL, a `provenance_class`
 (`caption`, `web-extraction`, `metadata`, `machine-transcription`, or `none`), `evidence_eligible`, and
 `transcript_eligible`. Only a fresh regular VTT bound to a valid receipt has
 caption and transcript eligibility. `metadata-only` may support metadata
-claims only; `no-captions`, stale/unreceipted captions, failures, and blocked
-installation are not transcript evidence and must not be used to synthesize
-transcript facts. Local STT is always labeled `machine-transcription` with
-both eligibility flags false.
+claims only; `no-captions`, failures, and blocked installation provide no
+source material. Stale or unreceipted caption text may inform a provisional
+synthesis when it is labeled as unverified and never as an official caption.
+Local STT is always labeled `machine-transcription` with both eligibility flags
+false and must not be presented as caption evidence.
 
 Evidence lifecycle is separate from capture lifecycle:
 `acquired → unverified → verifying → verified | exhausted | blocked`.
 `web-extraction` preserves public content with its retrieval method, timestamp,
 URL, and hash, but never becomes an official caption. Report the provenance
 class and lifecycle status exactly as stored.
+
+Knowledge readiness is separate from evidence strength. When source material is
+safely acquired and compiled, report `knowledge_readiness=ready` and use it for
+ordinary agent work even when `evidence_status=unverified`; retain provenance,
+retrieval details, and confidence. `evidence_status=verified` is an optional
+stronger claim-quality label, never the availability gate. Unavailable, empty,
+or blocked acquisition is `knowledge_readiness=unready` and must not produce a
+source or fabricated synthesis.
 
 Public-source verification has two independent gates. A source host is never an
 authority merely because it appeared in the prompt or contains words such as
@@ -119,18 +129,17 @@ bounded blocked status. The automatic hook never installs a dependency or
 claims a caption that was not acquired. The foreground worker always honors
 `next_retry_at`; it must not force-claim a retry before its backoff is due.
 
-Stop finalization has two gates. Receipt validation produces `evidence-ready`,
-not completion. `verified` additionally requires exactly one bounded
-`youtube-knowledge` artifact under Wiki `wiki/`, with its artifact hash,
-queue/source binding, receipt IDs, every receipt caption hash, claim-to-
+Stop finalization does not gate ordinary acquired knowledge. Receipt validation
+and the bounded `youtube-knowledge` artifact remain required only before
+claiming the stronger `verified` caption label. That artifact must bind its
+hash, queue/source URLs, receipt IDs, every receipt caption hash, claim-to-
 evidence references, `provenance_class=caption`, `evidence_status=verified`,
-`grounded=true`, and `quality_status=verified`. Its synthesis must contain
-the receipt-bound sources and the required quality sections. Missing, stale,
-tampered, unrelated, or duplicate artifacts keep Stop blocked. `exhausted`
-and `blocked` may end only with an explicit sanitized report containing
-terminal status, provenance, and an ineligible transcript result; metadata,
-web extraction, stale captions, and machine transcription never become caption
-evidence. Nonterminal jobs cannot create a semantic completion capture.
+`grounded=true`, and `quality_status=verified`, with the required synthesis
+sections. Missing, stale, tampered, unrelated, or duplicate artifacts leave
+the knowledge usable with its declared provenance but do not upgrade it to
+`verified`; they do not block ordinary Stop capture. `exhausted`, `blocked`,
+and empty acquisition never become ready and never justify fabricated source
+content. Nonterminal jobs remain bounded and do not create a false ready signal.
 
 The approved installer uses the current Python interpreter's user site and the
 exact package pin `yt-dlp==2026.08.19`; it does not run Homebrew or an unpinned
@@ -159,8 +168,7 @@ were deliberately excluded; neither status is a transcript. If no captions are
 available, run the permitted metadata route only after the caption outcome is
 known; a successful route is `metadata-only` and never a transcript. Continue
 with audio-to-STT only when media extraction is separately allowed and label
-that evidence `machine-transcription`. If all routes fail, preserve `error` and
-never invent transcript content.
+that evidence `machine-transcription`. machine-transcription cannot support transcript claims. If all routes fail, preserve `error` and never invent transcript content.
 
 Local STT is an agent-owned fallback after a terminal caption miss, never a
 `UserPromptSubmit` or Stop-hook action. It uses only public audio, private
@@ -189,13 +197,15 @@ helper. Do not use it to bypass login, paywall, anti-bot, region, quota, or othe
 access controls. Record the helper's JSON status, receipt ID, source hash, and
 receipt-bound caption file paths in the Wiki evidence provenance.
 Canonicalization of a caption requires that receipt ID; metadata-only,
-stale/unreceipted captions, and machine transcription cannot satisfy that gate.
+stale/unreceipted captions, and machine transcription cannot satisfy that
+stronger caption gate. A ready provisional synthesis must retain the actual
+provenance instead of implying official caption evidence.
 
 ## Evidence-aware final reports
 
-Final reports must state acquired sources, provenance class, evidence lifecycle,
-and confidence as facts. Public vendor, database, documentation, and
-provenance gaps remain agent-owned: continue bounded public lookup and durable
+Final reports must state acquired sources, provenance class, knowledge
+readiness, evidence lifecycle, and confidence as facts. Public vendor, database,
+documentation, and provenance gaps remain agent-owned: continue bounded public lookup and durable
 retry when possible, then report `unverified` or `exhausted`. Never write
 `Skipped`, `verify later`, `please verify`, or an equivalent routine user task.
 
@@ -204,3 +214,6 @@ required private credential or source, access control, or destructive production
 or an explicit authority decision. Name that boundary and keep the rest of the
 report bounded; do not expose runtime paths, secrets, raw transcripts, or tool
 output.
+
+Wiki lint is read-only in plugin workflows: use `llm-wiki lint` for inspection
+only and never run `llm-wiki lint --fix`.
