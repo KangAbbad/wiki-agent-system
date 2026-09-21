@@ -17,8 +17,8 @@ mkdir "$context_workspace"
 context=$(run_hook UserPromptSubmit "{\"cwd\":\"$context_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"context\",\"turn_id\":\"one\"}")
 printf '%s\n' "$context" | grep -Fq 'Stop hook owns the default semantic capture'
 printf '%s\n' "$context" | grep -Fq 'No command is required'
-printf '%s\n' "$context" | grep -Fq 'evidence lifecycle'
-printf '%s\n' "$context" | grep -Fq '`unverified` or `exhausted`'
+printf '%s\n' "$context" | grep -Fq 'Evidence lifecycle'
+printf '%s\n' "$context" | grep -Fq '`unverified`'
 printf '%s\n' "$context" | grep -Fq 'required private credential or source'
 printf '%s\n' "$context" | grep -Fq 'destructive production verification'
 printf '%s\n' "$context" | grep -Fq 'Public vendor, database'
@@ -26,8 +26,8 @@ printf '%s\n' "$context" | grep -Fq 'Public vendor, database'
 ! printf '%s\n' "$context" | grep -Eq 'python3.*wiki_ambient.py'
 ! grep -Fq '### Required semantic finalizer' "$plugin_root/skills/wiki-workspace/SKILL.md"
 grep -Fq '## Stop-owned capture' "$plugin_root/skills/wiki-workspace/SKILL.md"
-grep -Fq 'routine user delegation' "$plugin_root/skills/wiki-workspace/SKILL.md"
-grep -Fq 'routine user delegation' "$plugin_root/skills/wiki-ambient/SKILL.md"
+grep -Fq 'routine user verification' "$plugin_root/skills/wiki-workspace/SKILL.md"
+grep -Fq 'routine user verification' "$plugin_root/skills/wiki-ambient/SKILL.md"
 
 durable="$test_root/durable"
 mkdir "$durable"
@@ -178,13 +178,13 @@ grep -Fq 'tests passed' "$capture"
 public_gap="$test_root/public-gap"
 mkdir "$public_gap"
 public_context=$(run_hook UserPromptSubmit "{\"cwd\":\"$public_gap\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"public-gap\",\"turn_id\":\"one\",\"prompt\":\"Verify production drop database docs https://example.test/spec\"}")
-printf '%s' "$public_context" | grep -Fq 'status=blocked'
-printf '%s' "$public_context" | grep -Fq 'authority_request=destructive production verification'
+printf '%s' "$public_context" | grep -Fq 'Usage note: treat this as a production mutation'
+printf '%s' "$public_context" | grep -Fq 'Source material is unavailable'
 ! printf '%s' "$public_context" | grep -Fq 'Skipped'
-run_hook Stop "{\"cwd\":\"$public_gap\",\"hook_event_name\":\"Stop\",\"session_id\":\"public-gap\",\"turn_id\":\"one\",\"last_assistant_message\":\"Verification status: unverified; durable retry remains agent-owned.\"}" >/dev/null
+run_hook Stop "{\"cwd\":\"$public_gap\",\"hook_event_name\":\"Stop\",\"session_id\":\"public-gap\",\"turn_id\":\"one\",\"last_assistant_message\":\"Source material was unavailable; no source-backed synthesis was created.\"}" >/dev/null
 gap_capture=$(find "$public_gap/.wiki/inbox/autosave" -type f -name 'session-*.md')
-grep -Fq 'unverified' "$gap_capture"
-grep -Fq 'agent-owned' "$gap_capture"
+grep -Fq 'source-backed synthesis' "$gap_capture"
+! grep -Fq 'unverified' "$gap_capture"
 
 foreground="$test_root/foreground"
 mkdir "$foreground"
@@ -252,7 +252,7 @@ report = {
 }
 assert module.stop_foreground_gate(wiki, report)["block"] is False
 assert module.stop_foreground_gate(wiki, report)["capture"] is False
-report["last_assistant_message"] = "status: exhausted; provenance: metadata; transcript: not-available"
+report["last_assistant_message"] = "Source material is unavailable; no source-backed synthesis was created."
 assert module.stop_foreground_gate(wiki, report)["capture"] is True
 
 future_id = module.queue_id_for("future-controller", "turn")

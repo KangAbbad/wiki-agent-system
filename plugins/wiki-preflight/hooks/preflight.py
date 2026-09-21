@@ -7,9 +7,13 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from wiki_ambient import capture, capture_intent, capture_key, parse_capture_message, redact, retrieve_memory
 from evidence_verification import (
+    claim_calibration_text,
     drain_due_queue as drain_public_verification_queue,
+    explicit_claim_detail_request,
     knowledge_readiness,
+    ordinary_knowledge_context,
     preflight_context as public_verification_context,
+    stronger_claim_text,
 )
 from youtube_fallback import (
     QueueError,
@@ -55,11 +59,15 @@ KNOWLEDGE_ARTIFACT_MAX_FILES = 100
 KNOWLEDGE_ARTIFACT_MAX_BYTES = 256 * 1024
 KNOWLEDGE_ARTIFACT_HASH = re.compile(r"^[0-9a-f]{64}$")
 TERMINAL_REPORT_PATTERN = re.compile(
-    r"\b(?:status|state)\s*[:=]\s*(?:exhausted|blocked)\b.*\bprovenance\s*[:=]\s*[a-z-]+.*\b(?:transcript[_ -]?eligible|transcript)\s*[:=]\s*(?:false|no|not-available|not-verified)",
-    re.I | re.S,
+    r"\b(?:source\s+material|source-backed|source\s+content|knowledge|acqui(?:red|sition)|unavailable|not[- ]available|no\s+source|access\s+boundary|unable|could\s+not)\b",
+    re.I,
 )
 TRANSCRIPT_CLAIM_PATTERN = re.compile(
     r"\b(?:transcript[- ]backed|canonical knowledge|official caption|verified caption|official transcript|verified transcript|caption evidence\s*=\s*verified)\b",
+    re.I,
+)
+STRONG_CLAIM_PATTERN = re.compile(
+    r"\b(?:official|verified|guaranteed|safe|certain|definitive|proven)\b",
     re.I,
 )
 
@@ -796,68 +804,54 @@ def foreground_snapshot_signature(snapshot):
     )
 
 
-def foreground_context(root, snapshot, controller, urls):
-    lines = ["YouTube evidence (bounded foreground acquisition):"]
+def foreground_context(root, snapshot, controller, urls, *, include_internal=False):
+    lines = ["Source material for the requested video:"]
+    boundary_used = False
     if snapshot.get("status") != "ok":
-        lines.append(f"- queue: status={safe_text(str(snapshot.get('status') or 'unavailable'), 80)}; no mutation")
+        source = urls[0] if urls else "requested video"
+        lines.append(ordinary_knowledge_context(source, ready=False, include_guidance=False))
     else:
         for item in snapshot["records"]:
             files = item.get("files") if isinstance(item.get("files"), list) else []
             provenance = safe_text(str(item.get("provenance_class") or "none"), 40)
-            evidence_detail, evidence = evidence_context(root, item)
             readiness, evidence_status = foreground_knowledge_status(root, item)
-            transcript = "eligible" if evidence == "eligible" else "not-available"
+            item_boundary = None
+            if not boundary_used and item.get("status") in {"blocked", "blocked-install"}:
+                item_boundary = "access-control boundary"
+                boundary_used = True
             lines.append(
-                f"- {item['url']}: status={item['status']}; provenance={provenance}; "
-                f"evidence={evidence}; evidence_status={evidence_status}; "
-                f"knowledge_readiness={readiness}; transcript={transcript}; files={len(files)}"
+                ordinary_knowledge_context(
+                    item["url"],
+                    ready=readiness == "ready",
+                    provenance_class=provenance,
+                    boundary=item_boundary,
+                    include_guidance=False,
+                )
             )
-            lines.append(f"  {evidence_detail}")
-            if files and evidence == "eligible":
-                lines.append(f"  caption_files={'; '.join(files[:8])}")
-            elif files:
-                lines.append(f"  stale_caption_files={'; '.join(safe_text(str(file), 120) for file in files[:8])}")
-            if item["status"] == "blocked-install":
-                lines.append("  installation=blocked; no user action requested; report bounded verification status")
-            if item["status"] == "blocked":
-                lines.append("  access=blocked; report bounded access boundary")
-            if evidence == "retry-scheduled":
-                lines.append("  retry=foreground worker bounded; no user action requested")
-            if evidence == "exhausted":
-                lines.append("  retry=automatic cap reached; transcript evidence remains unavailable")
-            if transcript == "not-available":
-                lines.append("  transcript=not-verified; unreceipted or translated material may inform only provenance-labeled synthesis, not official-caption claims")
+            if include_internal:
+                evidence_detail, evidence = evidence_context(root, item)
+                lines.append(
+                    f"  Audit details: status={item.get('status')}; evidence={evidence}; "
+                    f"evidence_status={evidence_status}; knowledge_readiness={readiness}; "
+                    f"files={len(files)}; {evidence_detail}"
+                )
         if all(item.get("status") == "ok" and verified_caption_receipt(root, item) for item in snapshot["records"]):
-            artifact_status, _, _ = knowledge_artifact_snapshot(root, controller["queue_id"], snapshot)
-            lines.append(f"- knowledge: knowledge_readiness=ready; evidence_status=verified; stronger_artifact={artifact_status}")
-            if artifact_status != "verified":
-                lines.append("  stronger_verification=optional; a receipt-bound artifact upgrades the claim label to verified")
-        else:
-            ready_count = sum(foreground_knowledge_status(root, item)[0] == "ready" for item in snapshot["records"])
-            if ready_count:
-                lines.append(f"- knowledge: knowledge_readiness=ready; acquired_sources={ready_count}; evidence_status remains separate")
-            else:
-                lines.append("- knowledge: knowledge_readiness=unready; no acquired source material is available")
-        if len(urls) > 1:
-            lines.append(f"- queue: terminal={snapshot['terminal']}; pending={snapshot['pending']}.")
-    lines.append(f"- acquisition: state={controller['state']}")
-    lines.append("Receipt-bound caption evidence supports stronger transcript claims; unverified acquired material remains usable only with its declared provenance and confidence.")
-    if controller["state"] == "evidence-ready":
-        lines.append("Knowledge readiness is complete for ordinary synthesis; the receipt-bound artifact is optional unless the stronger verified label is claimed.")
-    if controller["state"] == "verified":
-        lines.append("Knowledge artifact quality: verified.")
-    if controller["state"] == "ready":
-        lines.append("Knowledge readiness is complete for ordinary synthesis; evidence status calibrates claim strength separately.")
+            artifact_status, artifact, _ = knowledge_artifact_snapshot(root, controller["queue_id"], snapshot)
+            if artifact_status == "verified" and artifact:
+                lines.append(f"- Artifact: {artifact.relative_to(root).as_posix()}")
+    lines.append(f"  {claim_calibration_text()}")
+    lines.append(f"  {stronger_claim_text()}")
     return "\n".join(lines)
 
 
 def advance_foreground_controller(root, cwd, prompt, payload):
     urls = youtube_prompt_urls(prompt)
     queue_id = foreground_queue_id(payload)
+    include_internal = explicit_claim_detail_request(prompt)
     if not urls and not queue_id:
         return ""
     if urls and not queue_id:
-        return "YouTube evidence:\n- acquisition=unavailable; no transcript claim is eligible."
+        return f"Source material for the requested video:\n{ordinary_knowledge_context(urls[0], ready=False)}"
     try:
         if urls:
             ensure_queue(root, urls, queue_id)
@@ -867,10 +861,10 @@ def advance_foreground_controller(root, cwd, prompt, payload):
             if controller_status == "missing":
                 return ""
         if controller_status in {"future-schema", "invalid", "unavailable"}:
-            return "YouTube evidence:\n- acquisition=unavailable; no transcript claim is eligible."
+            return f"Source material for the requested video:\n{ordinary_knowledge_context(urls[0] if urls else 'requested video', ready=False)}"
         if controller["state"] in FOREGROUND_TERMINAL_STATES:
             snapshot = queue_snapshot(root, queue_id)
-            return foreground_context(root, snapshot, controller, urls)
+            return foreground_context(root, snapshot, controller, urls, include_internal=include_internal)
         snapshot = queue_snapshot(root, queue_id)
         if controller["state"] == "evidence-ready":
             artifact_status, _, _ = knowledge_artifact_snapshot(root, queue_id, snapshot)
@@ -884,10 +878,10 @@ def advance_foreground_controller(root, cwd, prompt, payload):
                     reason="knowledge artifact finalized",
                 )
                 controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
-                return foreground_context(root, snapshot, controller, urls)
+                return foreground_context(root, snapshot, controller, urls, include_internal=include_internal)
             # Ordinary knowledge is already ready; only a supplied artifact can
             # upgrade the stronger receipt-bound label to verified.
-            return foreground_context(root, snapshot, controller, urls)
+            return foreground_context(root, snapshot, controller, urls, include_internal=include_internal)
         now = time.time()
         hook_deadline = time.monotonic() + min(YOUTUBE_HOOK_BUDGET, max(1, controller["deadline_at"] - now))
         while True:
@@ -903,7 +897,7 @@ def advance_foreground_controller(root, cwd, prompt, payload):
                     reason=reason,
                 )
                 controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
-                return foreground_context(root, queue_snapshot(root, queue_id), controller, urls)
+                return foreground_context(root, queue_snapshot(root, queue_id), controller, urls, include_internal=include_internal)
 
             action = controller["action"]
             if action == "caption-retry":
@@ -924,7 +918,7 @@ def advance_foreground_controller(root, cwd, prompt, payload):
                         reason="foreground retry budget exhausted",
                     )
                     controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
-                    return foreground_context(root, queue_snapshot(root, queue_id), controller, urls)
+                    return foreground_context(root, queue_snapshot(root, queue_id), controller, urls, include_internal=include_internal)
 
             before_snapshot = queue_snapshot(root, queue_id)
             result = bounded_youtube_drain(
@@ -963,9 +957,9 @@ def advance_foreground_controller(root, cwd, prompt, payload):
             )
             controller = next_controller if updated in {"updated", "stale"} and next_controller else controller
             if state in FOREGROUND_TERMINAL_STATES or state == "evidence-ready" or updated not in {"updated", "stale"}:
-                return foreground_context(root, snapshot, controller, urls)
+                return foreground_context(root, snapshot, controller, urls, include_internal=include_internal)
     except (OSError, QueueError):
-        return "YouTube evidence:\n- acquisition=unavailable; no transcript claim is eligible."
+        return f"Source material for the requested video:\n{ordinary_knowledge_context(urls[0] if urls else 'requested video', ready=False)}"
 
 
 def terminal_report_is_safe(payload, controller):
@@ -973,14 +967,17 @@ def terminal_report_is_safe(payload, controller):
     if not isinstance(message, str):
         return False
     message = redact(message).strip()
-    if TRANSCRIPT_CLAIM_PATTERN.search(message):
+    if TRANSCRIPT_CLAIM_PATTERN.search(message) or STRONG_CLAIM_PATTERN.search(message):
         return False
     return bool(TERMINAL_REPORT_PATTERN.search(message)) and controller["state"] in {"exhausted", "blocked"}
 
 
 def ordinary_knowledge_report_is_safe(payload):
     message = payload.get("last_assistant_message") if isinstance(payload, dict) else None
-    return isinstance(message, str) and not TRANSCRIPT_CLAIM_PATTERN.search(redact(message).strip())
+    if not isinstance(message, str):
+        return False
+    message = redact(message).strip()
+    return not (TRANSCRIPT_CLAIM_PATTERN.search(message) or STRONG_CLAIM_PATTERN.search(message))
 
 
 def discard_finalizer_state(root, payload):

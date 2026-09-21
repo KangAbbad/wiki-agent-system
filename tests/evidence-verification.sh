@@ -118,7 +118,28 @@ assert unverified["item"]["status"] == "exhausted"
 assert unverified["item"]["evidence_status"] == "unverified"
 assert unverified["item"]["provenance_class"] == "web-extraction"
 assert unverified["item"]["error_class"] == "authority-binding-required"
-assert "knowledge_readiness=ready" in module.context_for_item(wiki, unverified["item"])
+context = module.context_for_item(wiki, unverified["item"])
+assert "Knowledge ready for ordinary use" in context
+assert "source fact" in context and "inference" in context and "recommendation" in context
+for jargon in ("unverified", "evidence_status", "receipt", "queue", "confidence"):
+    assert jargon not in context, (jargon, context)
+internal_context = module.context_for_item(wiki, unverified["item"], include_internal=True)
+assert "evidence_status=unverified" in internal_context
+youtube_context = module.ordinary_knowledge_context(
+    "https://youtu.be/dQw4w9WgXcQ?si=tracking-query",
+    ready=True,
+    provenance_class="caption",
+)
+assert "https://www.youtube.com/watch?v=dQw4w9WgXcQ" in youtube_context
+assert "tracking-query" not in youtube_context
+boundary_context = module.ordinary_knowledge_context(
+    "https://example.test/spec",
+    ready=False,
+    boundary="destructive production verification",
+)
+assert boundary_context.count("Usage note:") == 1
+assert "production mutation" in boundary_context
+assert "please verify" not in boundary_context.lower()
 unverified_path = wiki / ".sessions" / "wiki-agent-system" / module.QUEUE_DIRNAME / f"{unverified_id}.json"
 unverified_data = json.loads(unverified_path.read_text())
 unverified_data["items"][0]["next_retry_at"] = 0

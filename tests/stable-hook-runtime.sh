@@ -74,16 +74,16 @@ test -f "$capture"
 
 caption_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable","turn_id":"caption","prompt":"Riset video https://youtu.be/dQw4w9WgXcQ"}' "$workspace")
 printf '%s' "$caption_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/caption-context.json"
-grep -q 'caption_evidence=verified' "$test_root/caption-context.json"
-grep -q 'receipt_id=' "$test_root/caption-context.json"
-grep -q 'caption_sha256=' "$test_root/caption-context.json"
-grep -q 'transcript=eligible' "$test_root/caption-context.json"
+caption_context=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"].split("Workspace knowledge index:", 1)[-1])' "$test_root/caption-context.json")
+printf '%s' "$caption_context" | grep -q 'Knowledge ready for ordinary use'
+printf '%s' "$caption_context" | grep -q 'basis=caption material'
+! printf '%s' "$caption_context" | grep -Eq 'caption_evidence=|receipt_id=|caption_sha256=|transcript=eligible|evidence_status=|queue:'
 ! grep -Fq "$test_root" "$test_root/caption-context.json"
 
 boundary_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable-boundary","turn_id":"one","prompt":"Verify production drop database docs https://example.test/spec"}' "$workspace")
 printf '%s' "$boundary_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/boundary-context.json"
-grep -q 'status=blocked' "$test_root/boundary-context.json"
-grep -q 'authority_request=destructive production verification' "$test_root/boundary-context.json"
+grep -q 'Usage note: treat this as a production mutation' "$test_root/boundary-context.json"
+grep -q 'Source material is unavailable' "$test_root/boundary-context.json"
 mv "$fallback_vendor" "$data_root/current/vendor"
 
 set_version() {

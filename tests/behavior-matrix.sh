@@ -53,7 +53,7 @@ policy="$test_root/plugin/defaults/policy.md"
 grep -q 'knowledge artifacts in `.wiki/`' "$policy"
 grep -q 'explicit product/developer documentation' "$policy"
 grep -q 'Public vendor, database' "$policy"
-grep -q 'evidence lifecycle' "$policy"
+grep -q 'Evidence lifecycle' "$policy"
 grep -q 'knowledge_readiness=ready' "$policy"
 grep -q 'never run `llm-wiki lint --fix`' "$policy"
 grep -q 'routine user task' "$policy"
@@ -64,12 +64,12 @@ grep -q 'routine user task' "$policy"
 ambient="$test_root/plugin/skills/wiki-ambient/SKILL.md"
 test -f "$ambient"
 grep -q 'projectless work' "$ambient"
-grep -q 'routine user delegation' "$ambient"
+grep -q 'routine user verification' "$ambient"
 
-# A public verification gap remains agent-owned; an authority boundary is precise.
+# A public gap remains agent-owned; a real boundary gets one concrete note.
 gap_prompt=$(printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"boundary\",\"turn_id\":\"one\",\"prompt\":\"Verify production drop database docs https://example.test/spec\"}" | "$launcher" "$hook")
-printf '%s' "$gap_prompt" | grep -q 'status=blocked'
-printf '%s' "$gap_prompt" | grep -q 'authority_request=destructive production verification'
+printf '%s' "$gap_prompt" | grep -q 'Usage note: treat this as a production mutation'
+printf '%s' "$gap_prompt" | grep -q 'Source material is unavailable'
 ! printf '%s' "$gap_prompt" | grep -q 'Skipped'
 
 # Retention dry-run finds expired autosaves; apply quarantines without deleting.

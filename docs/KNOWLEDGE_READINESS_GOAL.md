@@ -23,6 +23,34 @@ stronger verification workflow.
 `verified` must never mean merely "knowledge exists". Conversely,
 `unverified` must never mean "knowledge is unusable".
 
+## Claim calibration contract
+
+Internal provenance, evidence, receipt, queue, lifecycle, and confidence data
+remain durable and machine-readable. They calibrate the agent's wording and
+automatic gates; they are not ordinary completion content.
+
+Every normal completion uses one of three claim modes:
+
+1. **Source fact** — attribute what the acquired source says.
+2. **Agent inference** — label the deduction and keep it proportional to the
+   source support.
+3. **Actionable recommendation** — state the action and its conditions as a
+   recommendation, not as a source fact.
+
+Do not upgrade a limited source into `official`, `verified`, `guaranteed`,
+`safe`, or certain wording unless the existing stronger-evidence condition
+passes. A ready source remains usable with attributed, conditional wording.
+
+When a real application boundary matters, add at most one short note in this
+form: `Usage note: <boundary-specific constraint>.` Use the target version,
+deployment environment, destructive operation, or access boundary that
+actually applies. The note is context, not a refusal, routine verification
+request, or manual recovery workflow.
+
+Agent-owned bounded checks remain mandatory when they can run locally or
+against public sources. If no source material was acquired, say so plainly and
+do not fabricate source-backed knowledge.
+
 ## User experience
 
 - No slash command, repeated prompt, manual retry, receipt request, authority
@@ -30,8 +58,9 @@ stronger verification workflow.
   work.
 - The agent completes bounded acquisition, writes source and compiled knowledge,
   then reports that it is ready to use.
-- Provenance and confidence are concise metadata. They are surfaced when useful,
-  not as a blocking workflow or an alarm.
+- Provenance and confidence remain internal metadata for claim calibration and
+  explicit audit/citation requests; ordinary completions lead with readiness,
+  source links, and the applicable claim mode.
 - If a source cannot be acquired, the agent records the truthful bounded result;
   it does not fabricate content or ask the user to perform routine recovery.
 

@@ -77,27 +77,27 @@ retry; do not ask the user to repeat the prompt. It respects `next_retry_at` and
 never bypasses its backoff. It remains ineligible for transcript claims until a
 verified receipt is available.
 
-Acquired source material is `knowledge_readiness=ready` for ordinary agent use;
-`evidence_status=verified` is a stronger claim-quality signal. Receipt
-verification and one receipt-bound `youtube-knowledge` artifact in the
-workspace Wiki `wiki/` area are required only before declaring that stronger
-label. Bind its artifact hash, queue/source URLs, receipt IDs, every caption
-hash, and claim-to-evidence references; mark
+Acquired source material is ready for ordinary agent use. Internal evidence
+metadata remains a stronger-claim gate: receipt verification and one
+receipt-bound `youtube-knowledge` artifact in the workspace Wiki `wiki/` area
+are required only before using the stronger caption label. Bind its artifact
+hash, queue/source URLs, receipt IDs, every caption hash, and claim-to-evidence
+references; mark
 `provenance_class=caption`, `evidence_status=verified`, `grounded=true`, and
 `quality_status=verified`. Include `## Synthesis`, `## Sources`, and `## Quality`
 sections, with the receipt IDs, hashes, and source URLs in the grounded
 synthesis. Missing or duplicate artifacts do not block ordinary ready knowledge.
 
-Report `knowledge_readiness=ready` for acquired material, then state its
-provenance class (`caption`,
-`web-extraction`, `metadata`, `machine-transcription`, or `none`), evidence
-lifecycle, and confidence. Public vendor, database, documentation, and
-provenance verification is agent-owned: continue bounded lookup/retry and
-report `unverified` or `exhausted`; never emit `Skipped`, `verify later`,
-`please verify`, or equivalent routine user delegation. Ask for user action only
-for a required private credential/source, access-control boundary, destructive
-production verification, or an explicit authority decision, naming that exact
-boundary.
+Normal completions say that acquired knowledge is ready and link the source or
+compiled artifact. Use three claim modes: attribute source facts, label agent
+inferences, and state recommendations with their conditions. Keep provenance,
+evidence lifecycle, receipt, queue, and confidence metadata internal unless
+the user explicitly asks for audit/citation detail. Never use `official`,
+`verified`, `guaranteed`, `safe`, or certain wording without the stronger gate.
+When a real application boundary applies, add one concise `Usage note:` tied
+to that boundary; do not turn it into a refusal or routine user verification
+request. Public checks remain agent-owned, and no acquired source means no
+fabricated synthesis.
 
 For public evidence, never infer authority from the URL host or prompt wording.
 Require an explicit/trusted authority binding and validate that the page content

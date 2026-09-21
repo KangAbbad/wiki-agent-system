@@ -76,7 +76,10 @@ Evidence lifecycle is separate from capture lifecycle:
 `acquired → unverified → verifying → verified | exhausted | blocked`.
 `web-extraction` preserves public content with its retrieval method, timestamp,
 URL, and hash, but never becomes an official caption. Report the provenance
-class and lifecycle status exactly as stored.
+class and lifecycle status exactly as stored internally. Surface detailed
+evidence metadata only for runtime claim calibration or an explicit
+audit/citation request.
+The evidence lifecycle remains internal metadata for ordinary completions.
 
 Knowledge readiness is separate from evidence strength. When source material is
 safely acquired and compiled, report `knowledge_readiness=ready` and use it for
@@ -85,6 +88,29 @@ retrieval details, and confidence. `evidence_status=verified` is an optional
 stronger claim-quality label, never the availability gate. Unavailable, empty,
 or blocked acquisition is `knowledge_readiness=unready` and must not produce a
 source or fabricated synthesis.
+
+## Claim calibration for ordinary completions
+
+Internal provenance, evidence, receipt, queue, lifecycle, and confidence fields
+are preserved for runtime gates and explicit audit/citation requests. Do not
+copy them into a normal completion. Lead with `Knowledge ready for ordinary
+use` and link the source or compiled artifact when material was acquired.
+
+Use exactly the proportional claim modes needed by the result:
+
+- **Source fact:** attribute what the source says.
+- **Agent inference:** label the deduction and state its basis.
+- **Actionable recommendation:** state the action and its conditions as a
+  recommendation, not as a source fact.
+
+Do not call a claim `official`, `verified`, `guaranteed`, `safe`, or certain
+without the existing stronger-evidence condition. A limited source remains
+usable with attributed, conditional language. When a real application boundary
+matters, add one short `Usage note: <boundary-specific constraint>.` tied to
+the target version, deployment environment, destructive operation, or access
+boundary. Never turn that note into a refusal or routine human verification
+request. If no material was acquired, say that source-backed knowledge is
+unavailable and do not fabricate it.
 
 Public-source verification has two independent gates. A source host is never an
 authority merely because it appeared in the prompt or contains words such as
@@ -124,8 +150,8 @@ bounded `next_retry_at`; explicit subtitle absence is `no-captions`; exhausted
 retryable failures are `exhausted`. Metadata remains available as a separate
 `metadata_state=acquired` claim and never makes transcript evidence eligible.
 
-If the result is `install-approval-required`, pause that URL and report the
-bounded blocked status. The automatic hook never installs a dependency or
+If the result is `install-approval-required`, pause that URL and retain the
+blocked status internally. The automatic hook never installs a dependency or
 claims a caption that was not acquired. The foreground worker always honors
 `next_retry_at`; it must not force-claim a retry before its backoff is due.
 
@@ -203,11 +229,17 @@ provenance instead of implying official caption evidence.
 
 ## Evidence-aware final reports
 
-Final reports must state acquired sources, provenance class, knowledge
-readiness, evidence lifecycle, and confidence as facts. Public vendor, database,
-documentation, and provenance gaps remain agent-owned: continue bounded public lookup and durable
-retry when possible, then report `unverified` or `exhausted`. Never write
-`Skipped`, `verify later`, `please verify`, or an equivalent routine user task.
+Normal completions lead with the acquired source or artifact and say that the
+knowledge is ready for ordinary use. Keep lifecycle, receipt, queue, and
+confidence fields in runtime metadata; expose them only for an explicit
+audit/citation request. Public vendor, database, documentation, and provenance
+checks remain agent-owned. Use proportional source-fact, inference, and
+recommendation wording, and add at most one concrete `Usage note:` when a real
+application boundary applies.
+
+Never write `Skipped`, `verify later`, `please verify`, or an equivalent
+routine user task. If no source material was acquired, state that plainly and
+do not invent a synthesis.
 
 Ask the user for one precise authority only when the missing boundary is a
 required private credential or source, access control, or destructive production verification,

@@ -28,6 +28,7 @@ from youtube_fallback import (  # noqa: E402
     PROVENANCE_CLASSES,
     YOUTUBE_HOSTS,
     acquire_file_lock,
+    canonical_video,
     release_file_lock,
     safe_text,
 )
@@ -115,6 +116,65 @@ AUTHORITY_REASONS = frozenset({
     "destructive production verification",
     "explicit authority decision",
 })
+PROVENANCE_LABELS = {
+    "caption": "caption material",
+    "web-extraction": "public web source",
+    "metadata": "source metadata",
+    "machine-transcription": "local machine transcription",
+    "none": "no acquired source material",
+}
+BOUNDARY_USAGE_NOTES = {
+    "required private credential or source": "this claim depends on a private source; keep ordinary guidance limited to material already acquired",
+    "access-control boundary": "use only material authorized for this access boundary",
+    "destructive production verification": "treat this as a production mutation and use the approved change and recovery path before execution",
+    "explicit authority decision": "keep this as attributed guidance until the named authority decision is made",
+}
+EXPLICIT_DETAIL_REQUEST = re.compile(
+    r"\b(?:audit|citation(?:s)?|cite|receipt(?:s)?|provenance\s+metadata|evidence\s+details?)\b",
+    re.I,
+)
+BOUNDARY_UNSET = object()
+
+
+def explicit_claim_detail_request(prompt):
+    return isinstance(prompt, str) and bool(EXPLICIT_DETAIL_REQUEST.search(prompt))
+
+
+def boundary_usage_note(reason):
+    return BOUNDARY_USAGE_NOTES.get(reason)
+
+
+def claim_calibration_text():
+    return (
+        "Claim modes: source fact—attribute the source; inference—label the "
+        "deduction; recommendation—state the action and its conditions."
+    )
+
+
+def stronger_claim_text():
+    return "Keep official, guaranteed, safe, and certain wording behind the existing stronger evidence gate."
+
+
+def ordinary_knowledge_context(source, *, ready, provenance_class="none", artifact_path=None, boundary=None, include_guidance=True):
+    raw_source = str(source or "requested source")
+    try:
+        _, source = canonical_video(raw_source)
+    except ValueError:
+        source = safe_text(raw_source, 200)
+    if ready:
+        basis = PROVENANCE_LABELS.get(provenance_class, "acquired source material")
+        lines = [f"- Knowledge ready for ordinary use; source={source}; basis={basis}."]
+        if artifact_path:
+            lines.append(f"  Artifact: {safe_text(str(artifact_path), 200)}")
+    else:
+        lines = [f"- Source material is unavailable for {source}; no source-backed synthesis is available."]
+    if include_guidance:
+        lines.append(f"  {claim_calibration_text()}")
+        lines.append(f"  {stronger_claim_text()}")
+    note = boundary_usage_note(boundary)
+    if note:
+        lines.append(f"  Usage note: {note}.")
+    return "\n".join(lines)
 
 
 def eligibility(provenance_class, evidence_status):
@@ -1272,32 +1332,40 @@ def prompt_items(prompt):
     ]
 
 
-def context_for_item(wiki, item):
+def context_for_item(wiki, item, *, include_internal=False, boundary=BOUNDARY_UNSET):
     source = item.get("source_url", "")
     if source:
         parsed = urlsplit(source)
         safe_source = urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", "", ""))
     else:
         safe_source = "discovery"
+    try:
+        source_acquired = bool(item.get("source_path"))
+        ready = knowledge_readiness(
+            item.get("provenance_class", "none"),
+            item.get("evidence_status", "unverified"),
+            source_acquired,
+        )
+    except VerificationError:
+        ready = "unready"
+    if boundary is BOUNDARY_UNSET:
+        boundary = item.get("error_class") if item.get("error_class") in AUTHORITY_REASONS else boundary_reason(item.get("claim", ""))
+    context = ordinary_knowledge_context(
+        safe_source,
+        ready=ready == "ready",
+        provenance_class=item.get("provenance_class", "none"),
+        artifact_path=item.get("source_path"),
+        boundary=boundary,
+    )
+    if not include_internal:
+        return context
     fields = [
-        f"source={safe_source}",
         f"status={item.get('status', 'unavailable')}",
         f"evidence_status={item.get('evidence_status', 'unverified')}",
+        f"knowledge_readiness={ready}",
         f"provenance={item.get('provenance_class', 'none')}",
         f"evidence={'eligible' if item.get('evidence_eligible') else 'ineligible'}",
     ]
-    try:
-        source_acquired = bool(item.get("source_path"))
-        fields.append(
-            "knowledge_readiness="
-            + knowledge_readiness(
-                item.get("provenance_class", "none"),
-                item.get("evidence_status", "unverified"),
-                source_acquired,
-            )
-        )
-    except VerificationError:
-        fields.append("knowledge_readiness=unready")
     if item.get("content_sha256"):
         fields.append(f"content_sha256={item['content_sha256']}")
     if item.get("evidence_source_url"):
@@ -1309,20 +1377,25 @@ def context_for_item(wiki, item):
         fields.append("retry=durable")
     if item.get("authority_host"):
         fields.append(f"authority={safe_text(item['authority_host'], 120)}")
-    if item.get("status") == "blocked" and item.get("error_class") in AUTHORITY_REASONS:
-        fields.append(f"authority_request={safe_text(item.get('error_class') or 'specific authority boundary', 120)}")
-    return "- " + "; ".join(fields)
+    return context + "\n  Audit details: " + "; ".join(fields)
 
 
 def preflight_context(wiki, prompt, deadline=6.0):
     items = prompt_items(prompt)
     if not items:
         if PUBLIC_GAP.search(prompt):
-            return "Public evidence verification: status=unverified; source=not-found; agent-owned bounded lookup/retry required."
+            return ordinary_knowledge_context("requested public source", ready=False)
         return ""
-    lines = ["Public evidence verification (agent-owned; bounded; public sources only):"]
+    include_internal = explicit_claim_detail_request(prompt)
+    lines = ["Source material and claim calibration (agent-owned public lookup):"]
     started = time.monotonic()
+    boundary_used = False
     for index, (claim, source_url, expected) in enumerate(items):
+        item_boundary = boundary_reason(claim)
+        if item_boundary and boundary_used:
+            item_boundary = None
+        elif item_boundary:
+            boundary_used = True
         try:
             queue_id, _ = ensure_queue(wiki, claim, source_url, expected)
             remaining = deadline - (time.monotonic() - started)
@@ -1333,14 +1406,14 @@ def preflight_context(wiki, prompt, deadline=6.0):
             )
             item = snapshot.get("item")
             if item:
-                lines.append(context_for_item(wiki, item))
+                lines.append(context_for_item(wiki, item, include_internal=include_internal, boundary=item_boundary))
             else:
-                lines.append(f"- source={safe_text(source_url, 160)}; status={snapshot.get('status', 'unavailable')}; evidence_status=unverified")
-        except (OSError, VerificationError) as error:
-            lines.append(f"- source={safe_text(source_url, 160)}; status=unverified; evidence_status=unverified; knowledge_readiness=unready; retry=durable; reason={safe_text(str(error), 120)}")
+                lines.append(ordinary_knowledge_context(source_url, ready=False, boundary=item_boundary))
+        except (OSError, VerificationError):
+            lines.append(ordinary_knowledge_context(source_url, ready=False, boundary=item_boundary))
     if len(items) > 2:
-        lines.append(f"- queued={len(items) - 2} additional public source(s); automatic retry remains agent-owned.")
-    lines.append("Public-source gaps must be reported as unverified, exhausted, or blocked; do not delegate routine verification to the user.")
+        lines.append(f"- Additional source requests remain with the bounded agent-owned lookup ({len(items) - 2} more).")
+    lines.append("Use acquired material immediately with attributed, proportional wording; do not ask the user to repeat routine source work.")
     return "\n".join(lines)
 
 

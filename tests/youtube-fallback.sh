@@ -11,6 +11,10 @@ launcher="$test_plugin/hooks/launcher.sh"
 script="$test_plugin/scripts/youtube_fallback.py"
 hook="$test_plugin/hooks/preflight.py"
 
+context_only() {
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"].split("Workspace knowledge index:", 1)[-1])'
+}
+
 "$launcher" "$script" self-test
 help=$({ "$launcher" "$script" --help; } 2>&1)
 printf '%s' "$help" | grep -q 'Fetch YouTube captions and explicitly agent-owned local transcriptions'
@@ -454,12 +458,11 @@ printf '%s\n' '# Workspace Wiki' >"$metadata_queue_workspace/.wiki/_index.md"
 metadata_queue_prompt='Riset video https://www.youtube.com/watch?v=tGJTzahuapo&si=tracking-query'
 metadata_queue_output=$(printf '%s' "{\"cwd\":\"$metadata_queue_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"metadata\",\"turn_id\":\"one\",\"prompt\":\"$metadata_queue_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_METADATA=1 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$hook")
-printf '%s' "$metadata_queue_output" | grep -q 'status=no-captions'
-printf '%s' "$metadata_queue_output" | grep -q 'provenance=metadata'
-printf '%s' "$metadata_queue_output" | grep -q 'evidence=metadata-only'
-printf '%s' "$metadata_queue_output" | grep -q 'caption_evidence=ineligible; reason=metadata-only; receipt=missing-or-invalid'
-printf '%s' "$metadata_queue_output" | grep -q 'transcript=not-available'
-printf '%s' "$metadata_queue_output" | grep -q 'machine-transcription cannot support transcript claims'
+metadata_queue_context=$(printf '%s' "$metadata_queue_output" | context_only)
+printf '%s' "$metadata_queue_context" | grep -q 'Knowledge ready for ordinary use'
+printf '%s' "$metadata_queue_context" | grep -q 'basis=source metadata'
+printf '%s' "$metadata_queue_context" | grep -q 'source fact'
+! printf '%s' "$metadata_queue_context" | grep -Eq 'status=no-captions|caption_evidence=|transcript=not-available|receipt=|evidence_status='
 metadata_queue_record=$(find "$metadata_queue_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$metadata_queue_record" <<'PY'
 import json
@@ -490,8 +493,10 @@ foreground_retry_log="$test_root/foreground-retry-fetches.log"
 foreground_retry_marker="$test_root/foreground-retry-once"
 foreground_retry_output=$(printf '%s' "{\"cwd\":\"$foreground_retry_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"foreground-retry\",\"turn_id\":\"one\",\"prompt\":\"$foreground_retry_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL_ONCE_FILE="$foreground_retry_marker" FAKE_YTDLP_LOG="$foreground_retry_log" "$launcher" "$hook")
-printf '%s' "$foreground_retry_output" | grep -q 'status=ok'
-printf '%s' "$foreground_retry_output" | grep -q 'caption_evidence=verified'
+foreground_retry_context=$(printf '%s' "$foreground_retry_output" | context_only)
+printf '%s' "$foreground_retry_context" | grep -q 'Knowledge ready for ordinary use'
+printf '%s' "$foreground_retry_context" | grep -q 'basis=caption material'
+! printf '%s' "$foreground_retry_context" | grep -Eq 'status=ok|caption_evidence=|receipt=|evidence_status='
 foreground_retry_record=$(find "$foreground_retry_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 foreground_retry_controller=$(find "$foreground_retry_workspace/.wiki/.sessions/wiki-agent-system/foreground-loops" -type f -name '*.json' -print)
 python3 - "$foreground_retry_record" "$foreground_retry_controller" <<'PY'
@@ -562,10 +567,10 @@ printf '%s\n' 'WEBVTT' '' '00:00.000 --> 00:01.000' 'stale fixture caption' >"$s
 stale_context_prompt='Riset video https://youtu.be/dQw4w9WgXcQ'
 stale_context_output=$(printf '%s' "{\"cwd\":\"$stale_context_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"stale-context\",\"turn_id\":\"one\",\"prompt\":\"$stale_context_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
-printf '%s' "$stale_context_output" | grep -q 'status=no-captions'
-printf '%s' "$stale_context_output" | grep -q 'caption_evidence=ineligible; reason=stale-or-unreceipted; receipt=missing-or-invalid'
-printf '%s' "$stale_context_output" | grep -q 'transcript=not-available'
-printf '%s' "$stale_context_output" | grep -q 'stale/unreceipted captions'
+stale_context=$(printf '%s' "$stale_context_output" | context_only)
+printf '%s' "$stale_context" | grep -q 'Source material is unavailable'
+! printf '%s' "$stale_context" | grep -q 'Knowledge ready for ordinary use'
+! printf '%s' "$stale_context" | grep -Eq 'status=no-captions|caption_evidence=|transcript=not-available|receipt=|evidence_status='
 
 unreceipted_workspace="$test_root/unreceipted-workspace"
 mkdir -p "$unreceipted_workspace/.wiki/raw" "$unreceipted_workspace/.wiki/wiki" "$unreceipted_workspace/.wiki/inbox"
@@ -610,10 +615,10 @@ queue_path.write_text(json.dumps(data, sort_keys=True) + "\n")
 PY
 unreceipted_output=$(printf '%s' "{\"cwd\":\"$unreceipted_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"unreceipted\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize video $unreceipted_url\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
-printf '%s' "$unreceipted_output" | grep -q 'status=ok; provenance=caption; evidence=unreceipted-or-invalid; evidence_status=unverified; knowledge_readiness=ready'
-printf '%s' "$unreceipted_output" | grep -q 'stale_caption_files=62qCljKilH8.vtt'
-printf '%s' "$unreceipted_output" | grep -q 'Knowledge readiness is complete for ordinary synthesis'
-! printf '%s' "$unreceipted_output" | grep -q 'caption_evidence=verified'
+unreceipted_context=$(printf '%s' "$unreceipted_output" | context_only)
+printf '%s' "$unreceipted_context" | grep -q 'Knowledge ready for ordinary use'
+printf '%s' "$unreceipted_context" | grep -q 'basis=caption material'
+! printf '%s' "$unreceipted_context" | grep -Eq 'status=ok|stale_caption_files=|caption_evidence=|receipt=|evidence_status=|confidence'
 unreceipted_stop=$(printf '%s' "{\"cwd\":\"$unreceipted_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"unreceipted\",\"turn_id\":\"one\",\"last_assistant_message\":\"Unverified caption material was used with provenance and confidence.\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
 ! printf '%s' "$unreceipted_stop" | grep -q '"decision": "block"'
@@ -661,10 +666,9 @@ path.write_text(json.dumps(data, sort_keys=True) + "\n")
 PY
 failure_blocked_output=$(printf '%s' "{\"cwd\":\"$failure_blocked_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"failure-blocked\",\"turn_id\":\"one\",\"prompt\":\"Riset video $blocked_url dan $failure_url\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
-printf '%s' "$failure_blocked_output" | grep -q 'status=blocked; provenance=none; evidence=none; evidence_status=blocked; knowledge_readiness=unready'
-printf '%s' "$failure_blocked_output" | grep -q 'status=error; provenance=none; evidence=none; evidence_status=exhausted; knowledge_readiness=unready'
-printf '%s' "$failure_blocked_output" | grep -q 'knowledge_readiness=unready; no acquired source material is available'
-! printf '%s' "$failure_blocked_output" | grep -q 'knowledge_readiness=ready'
+failure_blocked_context=$(printf '%s' "$failure_blocked_output" | context_only)
+test "$(printf '%s' "$failure_blocked_context" | grep -c 'Source material is unavailable')" -ge 2
+! printf '%s' "$failure_blocked_context" | grep -Eq 'status=blocked|status=error|knowledge_readiness=|evidence_status=|receipt=|queue:|confidence'
 failure_blocked_stop=$(printf '%s' "{\"cwd\":\"$failure_blocked_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"failure-blocked\",\"turn_id\":\"one\",\"last_assistant_message\":\"Acquisition failed or was blocked; no source material was used.\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$launcher" "$hook")
 ! printf '%s' "$failure_blocked_stop" | grep -q '"decision": "block"'
@@ -681,12 +685,11 @@ printf '%s\n' '# Workspace Wiki' >"$hook_workspace/.wiki/_index.md"
 historical_prompt='Tolong riset dan buat knowledge base berbahasa Indonesia dari empat video YouTube berikut: https://www.youtube.com/watch?v=S78sl3d8D1I https://www.youtube.com/watch?v=DEG-k0r9C2E https://www.youtube.com/watch?v=tGJTzahuapo https://www.youtube.com/watch?v=62qCljKilH8'
 hook_output=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"prompt\":\"$historical_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$hook_log" "$launcher" "$hook")
-printf '%s' "$hook_output" | grep -q 'YouTube evidence (bounded foreground acquisition)'
-printf '%s' "$hook_output" | grep -q 'status=ok'
-printf '%s' "$hook_output" | grep -q 'caption_evidence=verified'
-printf '%s' "$hook_output" | grep -q 'receipt_id='
-printf '%s' "$hook_output" | grep -q 'caption_sha256='
-printf '%s' "$hook_output" | grep -q 'terminal=4; pending=0'
+hook_context=$(printf '%s' "$hook_output" | context_only)
+printf '%s' "$hook_context" | grep -q 'Source material for the requested video'
+printf '%s' "$hook_context" | grep -q 'Knowledge ready for ordinary use'
+printf '%s' "$hook_context" | grep -q 'basis=caption material'
+! printf '%s' "$hook_context" | grep -Eq 'status=ok|caption_evidence=|receipt_id=|caption_sha256=|terminal=|queue:|confidence'
 ! printf '%s' "$hook_output" | grep -Fq 'skipped='
 ! printf '%s' "$hook_output" | grep -Fq 'process on demand'
 ! printf '%s' "$hook_output" | grep -Fq '$PLUGIN_ROOT'
@@ -883,7 +886,10 @@ assert "interrupted checkpoint preserved" in controller["reason"]
 PY
 interrupt_continuation=$(printf '%s' "{\"cwd\":\"$interrupt_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"interrupt\",\"turn_id\":\"one\",\"prompt\":\"Foreground continuation\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_FAIL=1 "$launcher" "$hook")
-printf '%s' "$interrupt_continuation" | grep -q 'state=evidence-ready'
+interrupt_continuation_context=$(printf '%s' "$interrupt_continuation" | context_only)
+printf '%s' "$interrupt_continuation_context" | grep -q 'Knowledge ready for ordinary use'
+printf '%s' "$interrupt_continuation_context" | grep -q 'basis=caption material'
+! printf '%s' "$interrupt_continuation_context" | grep -Eq 'state=|status=|receipt=|evidence_status=|confidence'
 test ! -e "$test_root/interrupt-fetches.log"
 python3 - "$interrupt_queue" <<'PY'
 import json
@@ -936,9 +942,9 @@ slow_output=$(printf '%s' "{\"cwd\":\"$slow_workspace\",\"hook_event_name\":\"Us
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_CAPTION_DELAY=8 FAKE_YTDLP_METADATA_DELAY=10 FAKE_YTDLP_NO_CAPTIONS=1 "$launcher" "$hook")
 slow_elapsed=$(( $(date +%s) - slow_started ))
 test "$slow_elapsed" -lt 45
-printf '%s' "$slow_output" | grep -q 'status=retryable'
-printf '%s' "$slow_output" | grep -Eq 'terminal=0; pending=[1-4]'
-printf '%s' "$slow_output" | grep -q 'acquisition: state=exhausted'
+slow_context=$(printf '%s' "$slow_output" | context_only)
+test "$(printf '%s' "$slow_context" | grep -c 'Source material is unavailable')" -ge 4
+! printf '%s' "$slow_context" | grep -Eq 'status=retryable|terminal=|acquisition:|evidence_status=|queue:|confidence'
 slow_record=$(find "$slow_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$slow_record" <<'PY'
 import json
@@ -1016,15 +1022,21 @@ no_identity_first=$(printf '%s' "{\"cwd\":\"$no_identity_workspace\",\"hook_even
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$no_identity_log" "$launcher" "$hook")
 no_identity_second=$(printf '%s' "{\"cwd\":\"$no_identity_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"\",\"turn_id\":\"\",\"prompt\":\"$no_identity_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$no_identity_log" "$launcher" "$hook")
-printf '%s' "$no_identity_first" | grep -q 'acquisition=unavailable; no transcript claim is eligible.'
-printf '%s' "$no_identity_second" | grep -q 'acquisition=unavailable; no transcript claim is eligible.'
+no_identity_first_context=$(printf '%s' "$no_identity_first" | context_only)
+no_identity_second_context=$(printf '%s' "$no_identity_second" | context_only)
+printf '%s' "$no_identity_first_context" | grep -q 'Source material is unavailable'
+printf '%s' "$no_identity_second_context" | grep -q 'Source material is unavailable'
+! printf '%s\n%s' "$no_identity_first_context" "$no_identity_second_context" | grep -Eq 'acquisition=|transcript claim|evidence_status=|receipt=|queue:|confidence'
 test ! -e "$no_identity_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues"
 test ! -e "$no_identity_workspace/.wiki/inbox/youtube/S78sl3d8D1I.vtt"
 test ! -e "$no_identity_log"
 
 repeat_output=$(printf '%s' "{\"cwd\":\"$hook_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"youtube-hook\",\"turn_id\":\"one\",\"prompt\":\"$historical_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$hook_log" "$launcher" "$hook")
-printf '%s' "$repeat_output" | grep -q 'terminal=4; pending=0'
+repeat_context=$(printf '%s' "$repeat_output" | context_only)
+test "$(printf '%s' "$repeat_context" | grep -c 'Knowledge ready for ordinary use')" -eq 4
+printf '%s' "$repeat_context" | grep -q 'basis=caption material'
+! printf '%s' "$repeat_context" | grep -Eq 'terminal=|pending=|status=|receipt=|evidence_status=|confidence'
 test "$(wc -l <"$hook_log" | tr -d ' ')" -eq 4
 
 queue_id=$(python3 - "$queue_record" <<'PY'
@@ -1101,7 +1113,10 @@ printf '%s\n' '# Workspace Wiki' >"$pending_workspace/.wiki/_index.md"
 pending_prompt='Riset lima video: https://www.youtube.com/watch?v=S78sl3d8D1I https://www.youtube.com/watch?v=DEG-k0r9C2E https://www.youtube.com/watch?v=tGJTzahuapo https://www.youtube.com/watch?v=62qCljKilH8 https://www.youtube.com/watch?v=dQw4w9WgXcQ'
 pending_output=$(printf '%s' "{\"cwd\":\"$pending_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"pending\",\"turn_id\":\"one\",\"prompt\":\"$pending_prompt\"}" \
   | HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" FAKE_YTDLP_LOG="$test_root/pending-fetches.log" "$launcher" "$hook")
-printf '%s' "$pending_output" | grep -q 'terminal=5; pending=0'
+pending_context=$(printf '%s' "$pending_output" | context_only)
+test "$(printf '%s' "$pending_context" | grep -c 'Knowledge ready for ordinary use')" -eq 5
+printf '%s' "$pending_context" | grep -q 'basis=caption material'
+! printf '%s' "$pending_context" | grep -Eq 'terminal=|pending=|status=|receipt=|evidence_status=|confidence'
 pending_record=$(find "$pending_workspace/.wiki/.sessions/wiki-agent-system/youtube-queues" -type f -name '*.json' -print)
 python3 - "$pending_record" <<'PY'
 import json

@@ -66,9 +66,9 @@ tracks remain reading aids and are not transcript-eligible.
 
 Stop is capture/finalization only. It never executes or schedules caption retry
 and does not block `pending`, `running`, or `retryable` acquisition states.
-`knowledge_readiness=ready` means acquired material is available for ordinary
-synthesis; `evidence_status=verified` remains a stronger optional claim label.
-Receipt validity and exactly one receipt-bound `youtube-knowledge` artifact in
+Acquired material is ready for ordinary synthesis. Internal evidence metadata
+remains a stronger optional claim gate: receipt validity and exactly one
+receipt-bound `youtube-knowledge` artifact in
 Wiki `wiki/` are required only for that stronger label. The artifact still
 binds the queue/source URLs, artifact hash, receipt IDs, every caption hash,
 claim-to-evidence references, and the
@@ -87,16 +87,17 @@ canonical evidence. Never ask the user to run a command. If prerequisites are
 missing, report the bounded unavailable status and continue with the evidence
 class actually acquired.
 
-For every evidence-bearing result, report the source, `knowledge_readiness=ready`
-when material is acquired, provenance class,
-evidence lifecycle (`acquired`, `unverified`, `verifying`, `verified`,
-`exhausted`, or `blocked`), and confidence. Public vendor, database,
-documentation, and provenance verification remains agent-owned; continue the
-bounded lookup/retry and report `unverified` or `exhausted` when it cannot be
-verified. Do not emit `Skipped`, `verify later`, `please verify`, or equivalent
-routine user delegation. Ask for user action only for a required private
-credential/source, access-control boundary, destructive production verification,
-or an explicit authority decision, naming that exact boundary.
+Normal completions lead with the source or compiled artifact and say that
+acquired knowledge is ready for ordinary use. Use three claim modes: attribute
+source facts, label agent inferences, and state recommendations with their
+conditions. Keep provenance, evidence lifecycle, receipt, queue, and confidence
+metadata internal unless the user explicitly asks for audit/citation detail.
+Never use `official`, `verified`, `guaranteed`, `safe`, or certain wording
+without the stronger gate. Add at most one concise `Usage note:` when a real
+target-version, deployment, destructive-operation, or access boundary applies.
+Do not turn it into a refusal or routine user verification request. Public
+checks remain agent-owned; if no source material was acquired, do not fabricate
+knowledge.
 
 Authority is never inferred from a prompt URL or words such as `docs`, `vendor`,
 or `official`. `verified` requires an explicit/trusted authority binding and a

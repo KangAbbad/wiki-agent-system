@@ -85,6 +85,19 @@ payload = {
 }
 gate = module.stop_foreground_gate(wiki, payload)
 assert gate["block"] is False and gate["capture"] is True, gate
+context = module.foreground_context(wiki, module.queue_snapshot(wiki, queue_id), module.read_foreground_controller(wiki, queue_id)[1], [url])
+assert "Knowledge ready for ordinary use" in context
+assert "source fact" in context and "inference" in context and "recommendation" in context
+for jargon in ("evidence_status", "receipt", "queue", "confidence", "unverified"):
+    assert jargon not in context, (jargon, context)
+boundary_context = module.ordinary_knowledge_context(
+    url,
+    ready=True,
+    provenance_class="caption",
+    boundary="access-control boundary",
+)
+assert boundary_context.count("Usage note:") == 1
+assert "routine user verification" not in boundary_context.lower()
 
 body = f"""## Synthesis
 
