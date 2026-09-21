@@ -37,7 +37,7 @@ Review the staged diff for secrets and environment-specific identifiers. Commit
 the version bump and verified change, then push the exact commit to `main`.
 Record the commit SHA and version in the release report.
 
-## 4. Refresh installation and restart Codex
+## 4. Refresh installation and activate
 
 After the push, refresh the marketplace snapshot and install the released
 package:
@@ -47,15 +47,24 @@ codex plugin marketplace upgrade wiki-agent-system
 codex plugin add wiki-preflight@wiki-agent-system
 ```
 
-Then fully quit Codex and reopen it before validation. Reopening is mandatory
-after any plugin package, hook manifest, skill, or policy change: it reloads
-the plugin catalog, hook registrations, and skills for new tasks. Do not rely
-on an already-open task to validate a release.
+Then classify activation before validating:
+
+| Release shape | Activation requirement |
+|---|---|
+| Runtime implementation only; no manifest, `hooks/hooks.json`, skill, or plugin enablement change | Let the next trusted lifecycle hook provision the installed package, then verify `$PLUGIN_DATA/current` points to the released runtime. The next lifecycle hook uses that runtime without quitting Codex. |
+| Any skill, manifest, hook definition, trust-hash, MCP, or plugin enablement change | Start a **new Codex task** after installation and trust the changed hooks when prompted. Do not expect an already-open task to receive newly loaded skill instructions or hook registrations. |
+| Desktop catalog/cache does not recognize the installed version, or post-install validation fails because of stale registration | Fully quit and reopen Codex, then retry validation. This is recovery, not the normal release path. |
+
+Codex documents a new session as the activation boundary for bundled skills and
+tools. A running task's model context cannot be hot-reloaded. The stable runtime
+is intentionally separate: installed hook commands dispatch to
+`$PLUGIN_DATA/current`, so implementation-only updates can take effect at the
+next hook event after atomic provisioning.
 
 ## 5. Mandatory cache cleanup
 
-Only clean caches after steps 2–4 succeed and no active task is using the old
-runtime.
+Only clean caches after steps 2–4 succeed, the required activation boundary is
+met, and no active task is using the old runtime.
 
 1. Verify the new installed cache version and the stable runtime target match.
 2. Retain the current stable runtime and one immediately previous runtime for
@@ -85,7 +94,9 @@ Codex and complete the post-install validation below before resuming work.
 
 ## 6. Post-install validation
 
-In a new Codex task, verify all of the following:
+For a runtime-only release, validate using the installed package after the
+stable-runtime pointer check. For a release that changes skills, hook
+registration, trust, MCP, or enablement, validate in a new Codex task. Verify:
 
 - plugin information shows the released version;
 - one `SessionStart`, `UserPromptSubmit`, and `Stop` hook run successfully;
@@ -100,6 +111,7 @@ against the pushed commit. Mark the release complete only when it passes.
 ## Rollback
 
 If post-install validation fails, restore the immediately previous retained
-plugin version, repoint the stable runtime atomically through normal plugin
-provisioning, reopen Codex, and rerun the post-install checks. Do not edit Wiki
-or user configuration files to roll back a package.
+plugin version and repoint the stable runtime atomically through normal plugin
+provisioning. Start a new task for any registration or skill rollback; fully
+reopen Codex only if the catalog/cache is stale or the new task still fails.
+Do not edit Wiki or user configuration files to roll back a package.
