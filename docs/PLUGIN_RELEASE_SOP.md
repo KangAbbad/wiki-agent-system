@@ -108,6 +108,28 @@ registration, trust, MCP, or enablement, validate in a new Codex task. Verify:
 For production release, also run fresh Git marketplace clean-device validation
 against the pushed commit. Mark the release complete only when it passes.
 
+## Report contract
+
+Every progress, review, ratification, issue, failure, or success report must be
+short, direct, and organized as a list. Lead with one explicit status:
+`PASS`, `FAIL`, `PARTIAL`, `BLOCKED`, or `IN PROGRESS`. Include the applicable
+items below; write `None` when there are no issues or no next action:
+
+- **Result:** the central outcome in one sentence.
+- **Completed:** concrete work that finished.
+- **Issues / blockers:** every observed failure or unresolved issue, with its
+  evidence and impact. Do not hide later observed failures behind the first.
+- **Verification:** each relevant check as `PASS`, `FAIL`, `NOT RUN`, or
+  `INTERRUPTED`; never imply an incomplete gate passed.
+- **Artifacts:** changed files or reports, with direct paths or links.
+- **State / next action:** commit, push, version, install, activation, and cache
+  status when relevant; name one clear blocker or next action.
+
+Keep each bullet atomic and understandable without reading the full log. Put
+the first blocking failure first, but list every other failure that was actually
+observed. Distinguish failures from checks that were not run or were
+interrupted. Do not claim success from partial verification.
+
 ## Rollback
 
 If post-install validation fails, restore the immediately previous retained

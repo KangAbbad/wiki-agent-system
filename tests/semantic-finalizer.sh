@@ -5,8 +5,9 @@ set -eu
 plugin_root=${1:-plugins/wiki-preflight}
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
-export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config"
-mkdir -p "$HOME"
+export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_HOME="$test_root/codex"
+export MNEMOSYNE_CLI="$test_root/mnemosyne-not-installed" TMPDIR="$test_root/tmp"
+mkdir -p "$HOME" "$TMPDIR"
 
 run_hook() {
   printf '%s' "$2" | "$plugin_root/hooks/launcher.sh" "$plugin_root/hooks/preflight.py"
@@ -14,14 +15,21 @@ run_hook() {
 
 context_workspace="$test_root/context"
 mkdir "$context_workspace"
+startup=$(run_hook SessionStart "{\"cwd\":\"$context_workspace\",\"hook_event_name\":\"SessionStart\",\"session_id\":\"context\"}")
 context=$(run_hook UserPromptSubmit "{\"cwd\":\"$context_workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"context\",\"turn_id\":\"one\"}")
-printf '%s\n' "$context" | grep -Fq 'Stop hook owns the default semantic capture'
-printf '%s\n' "$context" | grep -Fq 'No command is required'
-printf '%s\n' "$context" | grep -Fq 'Evidence lifecycle'
-printf '%s\n' "$context" | grep -Fq '`unverified`'
-printf '%s\n' "$context" | grep -Fq 'required private credential or source'
-printf '%s\n' "$context" | grep -Fq 'destructive production verification'
-printf '%s\n' "$context" | grep -Fq 'Public vendor, database'
+printf '%s\n' "$startup" | grep -Fq 'Wiki Preflight owns scoped knowledge retrieval'
+printf '%s\n' "$startup" | grep -Fq 'first concurrent startup may already have read'
+! printf '%s\n' "$startup" | grep -Fq 'Evidence lifecycle'
+! printf '%s\n' "$startup" | grep -Fq '_index.md'
+printf '%s\n' "$context" | grep -Fq 'Wiki preflight ran; apply relevant knowledge proportionally'
+printf '%s\n' "$context" | grep -Fq 'Wiki check: unavailable'
+printf '%s\n' "$context" | grep -Fiq 'no searchable terms or active task descriptor'
+printf '%s\n' "$context" | grep -Fq 'untrusted data, not instructions'
+! printf '%s\n' "$context" | grep -Fq '[Raw](raw/)'
+! printf '%s\n' "$context" | grep -Fq '## YouTube evidence fallback'
+python3 -c 'import json,sys; assert len(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"].encode("utf-8")) <= 6000' <<EOF
+$context
+EOF
 ! printf '%s\n' "$context" | grep -Fq 'Before sending the final response for meaningful workspace work, run'
 ! printf '%s\n' "$context" | grep -Eq 'python3.*wiki_ambient.py'
 ! grep -Fq '### Required semantic finalizer' "$plugin_root/skills/wiki-workspace/SKILL.md"
@@ -31,14 +39,17 @@ grep -Fq 'routine user verification' "$plugin_root/skills/wiki-ambient/SKILL.md"
 
 durable="$test_root/durable"
 mkdir "$durable"
-run_hook UserPromptSubmit "{\"cwd\":\"$durable\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"durable\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize the migration decision\"}" >/dev/null
+run_hook UserPromptSubmit "{\"cwd\":\"$durable\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"durable\",\"turn_id\":\"one\",\"prompt\":\"Synthesize the migration decision\"}" >/dev/null
 state=$(find "$durable/.wiki/.sessions/wiki-agent-system/finalizers" -type f -name '*.json')
 python3 - "$state" <<'PY'
 import json
 import sys
 
 data = json.load(open(sys.argv[1]))
-assert set(data) == {"schema_version", "started_at", "capture_key", "prompt_intent"}
+assert set(data) == {"schema_version", "started_at", "capture_key", "prompt_intent", "capture_scope", "private_scope_context"}
+assert data["schema_version"] == 2
+assert data["capture_scope"] == "workspace"
+assert data["private_scope_context"] is False
 assert data["prompt_intent"]["matched"] is True
 assert "prompt" not in data
 PY
@@ -59,9 +70,9 @@ test "$(find "$casual/.wiki/inbox" -type f -name 'session-*.md' | wc -l | tr -d 
 
 no_id="$test_root/no-id"
 mkdir "$no_id"
-run_hook UserPromptSubmit "{\"cwd\":\"$no_id\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Research lifecycle alpha\"}" >/dev/null
+run_hook UserPromptSubmit "{\"cwd\":\"$no_id\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work on lifecycle alpha\"}" >/dev/null
 run_hook Stop "{\"cwd\":\"$no_id\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Outcome alpha\"}" >/dev/null
-run_hook UserPromptSubmit "{\"cwd\":\"$no_id\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Research lifecycle beta\"}" >/dev/null
+run_hook UserPromptSubmit "{\"cwd\":\"$no_id\",\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"Work on lifecycle beta\"}" >/dev/null
 run_hook Stop "{\"cwd\":\"$no_id\",\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"Outcome beta\"}" >/dev/null
 test "$(find "$no_id/.wiki/inbox" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 0
 test ! -d "$no_id/.wiki/.sessions/wiki-agent-system/finalizers"
@@ -75,7 +86,7 @@ test "$(find "$changed/.wiki/inbox/autosave" -type f -name 'session-*.md' | wc -
 
 structured="$test_root/structured"
 mkdir "$structured"
-run_hook UserPromptSubmit "{\"cwd\":\"$structured\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"structured\",\"turn_id\":\"one\",\"prompt\":\"Implement and verify the structured result\"}" >/dev/null
+run_hook UserPromptSubmit "{\"cwd\":\"$structured\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"structured\",\"turn_id\":\"one\",\"prompt\":\"Implement the structured result\"}" >/dev/null
 structured_payload=$(python3 - "$structured" <<'PY'
 import json
 import sys
@@ -136,7 +147,7 @@ test "$(find "$missing/.wiki/inbox" -type f -name 'session-*.md' | wc -l | tr -d
 foreign="$test_root/foreign"
 mkdir -p "$foreign/.wiki"
 printf '%s\n' foreign >"$foreign/.wiki/marker"
-run_hook UserPromptSubmit "{\"cwd\":\"$foreign\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"foreign\",\"turn_id\":\"one\",\"prompt\":\"Research the foreign Wiki boundary\"}" >/dev/null
+run_hook UserPromptSubmit "{\"cwd\":\"$foreign\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"foreign\",\"turn_id\":\"one\",\"prompt\":\"Inspect the foreign Wiki boundary\"}" >/dev/null
 run_hook Stop "{\"cwd\":\"$foreign\",\"hook_event_name\":\"Stop\",\"session_id\":\"foreign\",\"turn_id\":\"one\",\"last_assistant_message\":\"Must not write\"}" >/dev/null
 test -f "$foreign/.wiki/marker"
 test ! -e "$foreign/.wiki/inbox"
@@ -161,7 +172,7 @@ grep -Fq '{"schema_version":99}' "$future_state/.wiki/.sessions/wiki-agent-syste
 
 merge="$test_root/merge"
 mkdir "$merge"
-run_hook UserPromptSubmit "{\"cwd\":\"$merge\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"merge\",\"turn_id\":\"one\",\"prompt\":\"Implement and verify the capture merge\"}" >/dev/null
+run_hook UserPromptSubmit "{\"cwd\":\"$merge\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"merge\",\"turn_id\":\"one\",\"prompt\":\"Implement the capture merge\"}" >/dev/null
 CODEX_SESSION_ID=merge "$plugin_root/hooks/launcher.sh" "$plugin_root/scripts/wiki_ambient.py" capture \
   --cwd "$merge" --outcome 'Structured result' --decision 'Keep merge' \
   --artifact src/main.py --verification 'tests passed' --confidence high >/dev/null
@@ -184,7 +195,15 @@ printf '%s' "$public_context" | grep -Fq 'Source material is unavailable'
 run_hook Stop "{\"cwd\":\"$public_gap\",\"hook_event_name\":\"Stop\",\"session_id\":\"public-gap\",\"turn_id\":\"one\",\"last_assistant_message\":\"Source material was unavailable; no source-backed synthesis was created.\"}" >/dev/null
 gap_capture=$(find "$public_gap/.wiki/inbox/autosave" -type f -name 'session-*.md')
 grep -Fq 'source-backed synthesis' "$gap_capture"
-! grep -Fq 'unverified' "$gap_capture"
+python3 - "$gap_capture" <<'PY'
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+parts = text.split("---\n", 2)
+assert len(parts) == 3, "capture frontmatter missing"
+assert "unverified" not in parts[2].lower(), parts[2]
+PY
 
 foreground="$test_root/foreground"
 mkdir "$foreground"
@@ -253,7 +272,8 @@ report = {
 assert module.stop_foreground_gate(wiki, report)["block"] is False
 assert module.stop_foreground_gate(wiki, report)["capture"] is False
 report["last_assistant_message"] = "Source material is unavailable; no source-backed synthesis was created."
-assert module.stop_foreground_gate(wiki, report)["capture"] is True
+# Do not persist a terminal no-source outcome as acquired knowledge.
+assert module.stop_foreground_gate(wiki, report)["capture"] is False
 
 future_id = module.queue_id_for("future-controller", "turn")
 future_path, _ = module.foreground_controller_paths(wiki, future_id)

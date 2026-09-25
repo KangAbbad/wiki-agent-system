@@ -4,6 +4,9 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
+export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_HOME="$test_root/codex"
+export MNEMOSYNE_CLI="$test_root/mnemosyne-not-installed" TMPDIR="$test_root/tmp"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$TMPDIR"
 test_plugin="$test_root/plugin"
 cp -R "$root/plugins/wiki-preflight" "$test_plugin"
 rm -r "$test_plugin/vendor"
@@ -12,7 +15,7 @@ script="$test_plugin/scripts/youtube_fallback.py"
 hook="$test_plugin/hooks/preflight.py"
 
 context_only() {
-  python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"].split("Workspace knowledge index:", 1)[-1])'
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"])'
 }
 
 "$launcher" "$script" self-test

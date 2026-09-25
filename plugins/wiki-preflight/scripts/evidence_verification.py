@@ -60,7 +60,11 @@ SENSITIVE = re.compile(
     re.I,
 )
 PUBLIC_GAP = re.compile(
-    r"\b(?:authorit(?:y|ative)|database|vendor|provenance|spec(?:ification)?|reference|docs?|research|investigat\w*|lookup|source|citation|cite|verify|validation|check|audit|verifikasi|validasi|cek|uji)\b",
+    r"\b(?:authorit(?:y|ative)|database|vendor|provenance|spec(?:ification)?|reference|docs?|research|investigat\w*|lookup|source|citation|cite)\b",
+    re.I,
+)
+PUBLIC_REFERENCE_GAP = re.compile(
+    r"\b(?:authorit(?:y|ative)|database|vendor|provenance|spec(?:ification)?|reference|docs?)\b",
     re.I,
 )
 AUTHORITY_BINDING = re.compile(
@@ -168,12 +172,12 @@ def ordinary_knowledge_context(source, *, ready, provenance_class="none", artifa
             lines.append(f"  Artifact: {safe_text(str(artifact_path), 200)}")
     else:
         lines = [f"- Source material is unavailable for {source}; no source-backed synthesis is available."]
-    if include_guidance:
-        lines.append(f"  {claim_calibration_text()}")
-        lines.append(f"  {stronger_claim_text()}")
     note = boundary_usage_note(boundary)
     if note:
         lines.append(f"  Usage note: {note}.")
+    if include_guidance:
+        lines.append(f"  {claim_calibration_text()}")
+        lines.append(f"  {stronger_claim_text()}")
     return "\n".join(lines)
 
 
@@ -352,6 +356,32 @@ def explicit_authority(value):
         return authority_host(match.group(1))
     except VerificationError:
         return None
+
+
+def youtube_owned_request(prompt):
+    """Let the YouTube ingestion owner handle a video-only request."""
+    if not isinstance(prompt, str) or not prompt:
+        return False
+    has_youtube = False
+    has_other_public_url = False
+    for match in re.finditer(r"https?://[^\s<>'\"]+", prompt):
+        candidate = match.group(0).rstrip(".,;:!?)]}")
+        try:
+            canonical_video(candidate)
+        except ValueError:
+            try:
+                canonical_public_url(candidate)
+            except VerificationError:
+                continue
+            has_other_public_url = True
+        else:
+            has_youtube = True
+    return (
+        has_youtube
+        and not has_other_public_url
+        and not PUBLIC_REFERENCE_GAP.search(prompt)
+        and not explicit_authority(prompt)
+    )
 
 
 def claim_terms(claim):
@@ -1305,6 +1335,8 @@ def retry_queue(wiki, queue_id):
 def prompt_items(prompt):
     if not prompt:
         return []
+    if youtube_owned_request(prompt):
+        return []
     url_matches = list(re.finditer(r"https?://[^\s<>'\"]+", prompt))
     if not PUBLIC_GAP.search(prompt) and not url_matches and not explicit_authority(prompt):
         return []
@@ -1383,7 +1415,7 @@ def context_for_item(wiki, item, *, include_internal=False, boundary=BOUNDARY_UN
 def preflight_context(wiki, prompt, deadline=6.0):
     items = prompt_items(prompt)
     if not items:
-        if PUBLIC_GAP.search(prompt):
+        if PUBLIC_GAP.search(prompt) and not youtube_owned_request(prompt):
             return ordinary_knowledge_context("requested public source", ready=False)
         return ""
     include_internal = explicit_claim_detail_request(prompt)

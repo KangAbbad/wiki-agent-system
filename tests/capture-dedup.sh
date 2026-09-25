@@ -4,8 +4,9 @@ set -eu
 plugin_root=${1:-plugins/wiki-preflight}
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
-export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config"
-mkdir -p "$HOME"
+export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_HOME="$test_root/codex"
+export MNEMOSYNE_CLI="$test_root/mnemosyne-not-installed" TMPDIR="$test_root/tmp"
+mkdir -p "$HOME" "$TMPDIR"
 workspace="$test_root/workspace"
 mkdir "$workspace"
 printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"SessionStart\"}" | "$plugin_root/hooks/launcher.sh" "$plugin_root/hooks/preflight.py" >/dev/null
@@ -33,7 +34,7 @@ CODEX_SESSION_ID=two "$plugin_root/hooks/launcher.sh" "$plugin_root/scripts/wiki
   --cwd "$workspace" --outcome 'Separate task' --kind result >/dev/null
 test "$(find "$captures" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 2
 
-printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"hook-merge\",\"turn_id\":\"one\",\"prompt\":\"Implement and verify capture merging\"}" | "$plugin_root/hooks/launcher.sh" "$plugin_root/hooks/preflight.py" >/dev/null
+printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"hook-merge\",\"turn_id\":\"one\",\"prompt\":\"Implement capture merging\"}" | "$plugin_root/hooks/launcher.sh" "$plugin_root/hooks/preflight.py" >/dev/null
 CODEX_SESSION_ID=hook-merge "$plugin_root/hooks/launcher.sh" "$plugin_root/scripts/wiki_ambient.py" capture \
   --cwd "$workspace" --outcome 'Structured hook result' \
   --decision 'Keep one record' --artifact src/hook.py --verification 'merge passed' >/dev/null

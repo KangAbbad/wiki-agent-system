@@ -29,6 +29,19 @@ assert module.prompt_items("Research https://example.test/spec")
 assert module.prompt_items("Research https://example.test/spec")[0][2] is None
 assert module.prompt_items("Research authority_host=trusted.example https://example.test/spec")[0][2] == "trusted.example"
 assert module.prompt_items("Research PostgreSQL supports online index builds")[0][1] is None
+for local_prompt in (
+    "Implement and verify the capture merge",
+    "Check the local test output",
+    "Audit repository behavior",
+    "Validate the local capture",
+    "Verifikasi hasil tes lokal",
+    "Cek hasil test lokal",
+    "Uji hasil merge lokal",
+):
+    assert module.prompt_items(local_prompt) == [], local_prompt
+video_prompt = "Research and synthesize this video https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+assert module.prompt_items(video_prompt) == []
+assert module.prompt_items(video_prompt + " and compare the vendor docs")
 
 root = Path(tempfile.mkdtemp())
 wiki = root / ".wiki"
@@ -49,6 +62,8 @@ def fake_fetch(url, timeout):
         "final_url": url,
     }
 module.fetch_public_source = fake_fetch
+assert module.preflight_context(wiki, video_prompt) == ""
+assert calls == [], calls
 queue_id, _ = module.ensure_queue(
     wiki,
     "PostgreSQL supports online index builds",

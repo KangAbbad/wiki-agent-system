@@ -4,6 +4,9 @@ set -eu
 plugin_root=${1:-plugins/wiki-preflight}
 test_root=$(mktemp -d)
 trap 'rm -rf "$test_root"' EXIT
+export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_HOME="$test_root/codex"
+export MNEMOSYNE_CLI="$test_root/mnemosyne-not-installed" TMPDIR="$test_root/tmp"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$CODEX_HOME" "$TMPDIR"
 workspace="$test_root/workspace"
 mkdir "$workspace"
 printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"SessionStart\"}" | "$plugin_root/hooks/launcher.sh" "$plugin_root/hooks/preflight.py" >/dev/null

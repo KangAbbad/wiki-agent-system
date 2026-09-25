@@ -4,9 +4,10 @@ set -eu
 fail() { printf '%s\n' "FAIL: $*" >&2; exit 1; }
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
-mkdir -p "$root/codex" "$root/home" "$root/workspace"
+mkdir -p "$root/codex" "$root/home" "$root/config" "$root/workspace" "$root/tmp"
 
-export HOME="$root/home" CODEX_HOME="$root/codex"
+export HOME="$root/home" XDG_CONFIG_HOME="$root/config" CODEX_HOME="$root/codex"
+export MNEMOSYNE_CLI="$root/mnemosyne-not-installed" TMPDIR="$root/tmp"
 marketplace_source=${WIKI_MARKETPLACE_SOURCE:-KangAbbad/wiki-agent-system}
 marketplace_ref=${WIKI_MARKETPLACE_REF-main}
 if [ -d "$marketplace_source" ]; then
@@ -27,6 +28,11 @@ hooks_root=$(dirname "$plugin")
 installed_root=$(dirname "$hooks_root")
 launcher="$hooks_root/launcher.sh"
 test -x "$launcher" || fail "installed cache has no launcher"
+if [ "${WIKI_P1_TRACE:-0}" = 1 ]; then
+  sh -x "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/universal-preflight.sh" "$installed_root"
+else
+  sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/universal-preflight.sh" "$installed_root"
+fi
 sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/vendor-runtime-import.sh" "$installed_root"
 python3 - "$installed_root/defaults/ambient.json" <<'PY'
 import json
@@ -54,14 +60,15 @@ fallback_vendor="$root/fallback-vendor"
 mv "$stable_root/vendor" "$fallback_vendor"
 printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >"$root/start.json"
 "$stable_launcher" "$stable_root/scripts/evidence_verification.py" self-test >/dev/null
-printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"clean","turn_id":"one","prompt":"Research and synthesize the installed marketplace result"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >/dev/null
+printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"clean","turn_id":"one","prompt":"Synthesize the installed marketplace result"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >/dev/null
 printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"clean","turn_id":"one","last_assistant_message":"Completed clean-device verification"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >"$root/stop.json"
 ! grep -q '"decision": "block"' "$root/stop.json" || fail "installed Stop hook interrupted user response"
 
 test -f "$root/workspace/.wiki/.sessions/wiki-agent-system/marker.json" || fail "installed hook did not initialize workspace wiki"
 find "$root/workspace/.wiki/inbox/autosave" -type f -name '*.md' -print -quit | grep -q . || fail "installed Stop hook did not capture"
 grep -R -q 'Completed clean-device verification' "$root/workspace/.wiki/inbox/autosave" || fail "installed Stop hook omitted final result"
-grep -q 'Workspace knowledge index:' "$root/start.json" || fail "installed hook did not emit preflight context"
+grep -q 'Wiki Preflight owns scoped knowledge retrieval' "$root/start.json" || fail "installed hook did not emit the bounded startup capsule"
+! grep -q '_index.md' "$root/start.json" || fail "installed startup hook dumped the Wiki index"
 
 retention_workspace="$root/retention-workspace"
 mkdir -p "$retention_workspace/.wiki/raw" "$retention_workspace/.wiki/wiki" \
@@ -95,6 +102,11 @@ test -f "$retention_workspace/.wiki/.trash/autosave/active.md"
 test -f "$retention_workspace/.wiki/raw/keep.md"
 test -f "$retention_workspace/.wiki/wiki/keep.md"
 mv "$fallback_vendor" "$stable_root/vendor"
+if [ "${WIKI_P1_TRACE:-0}" = 1 ]; then
+  sh -x "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/universal-preflight.sh" "$stable_root"
+else
+  sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/universal-preflight.sh" "$stable_root"
+fi
 
 canonical_workspace="$root/canonical-workspace"
 mkdir -p "$canonical_workspace/.wiki/raw" "$canonical_workspace/.wiki/wiki"

@@ -2,6 +2,9 @@
 set -eu
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
+export HOME="$root/home" XDG_CONFIG_HOME="$root/config" CODEX_HOME="$root/codex"
+export MNEMOSYNE_CLI="$root/mnemosyne-not-installed" TMPDIR="$root/tmp"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$CODEX_HOME" "$TMPDIR"
 cp -R plugins/wiki-preflight "$root/plugin"
 test -f "$root/plugin/skills/wiki-ambient/SKILL.md"
 grep -q 'projectless work' "$root/plugin/skills/wiki-ambient/SKILL.md"
@@ -28,8 +31,8 @@ for document in \
   ! grep -Eq 'run.*semantic finalizer|execute.*semantic finalizer|stable launcher contract|capture --scope|python3.*wiki_ambient.py' "$document"
 done
 grep -q '"timeout": 45' "$root/plugin/hooks/hooks.json"
-test "$(grep -c 'provision.py' "$root/plugin/hooks/hooks.json")" -eq 4
-test "$(grep -c 'PLUGIN_DATA/current/hooks/preflight.py' "$root/plugin/hooks/hooks.json")" -eq 4
+test "$(grep -c 'provision.py' "$root/plugin/hooks/hooks.json")" -eq 6
+test "$(grep -c 'PLUGIN_DATA/current/hooks/preflight.py' "$root/plugin/hooks/hooks.json")" -eq 6
 mkdir "$root/workspace"
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"SessionStart\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 test -f "$root/workspace/.wiki/.sessions/wiki-agent-system/marker.json"
@@ -52,6 +55,6 @@ esac
 grep -q '^type: articles$' "$installed_raw"
 grep -q '^knowledge_readiness: ready$' "$installed_raw"
 
-printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"prompt\":\"Research and synthesize the installed runtime result\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
+printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"prompt\":\"Synthesize the installed runtime result\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 printf '%s' "{\"cwd\":\"$root/workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"installed-durable\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed durable installed verification\"}" | "$root/plugin/hooks/launcher.sh" "$root/plugin/hooks/preflight.py" >/dev/null
 grep -R -q 'Completed durable installed verification' "$root/workspace/.wiki/inbox/autosave"

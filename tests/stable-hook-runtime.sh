@@ -14,6 +14,9 @@ cp -R "$plugin_root" "$old_root"
 cp -R "$plugin_root" "$new_root"
 mkdir "$workspace"
 mkdir -p "$test_root/bin" "$test_root/home" "$test_root/config"
+export HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_HOME="$test_root/codex"
+export MNEMOSYNE_CLI="$test_root/mnemosyne-not-installed" TMPDIR="$test_root/tmp"
+mkdir -p "$TMPDIR"
 cat >"$test_root/bin/yt-dlp" <<'PY'
 #!/usr/bin/env python3
 from pathlib import Path
@@ -40,7 +43,16 @@ mv "$data_root/current/vendor" "$fallback_vendor"
 rm -rf "$runtime_root"
 payload=$(printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$workspace")
 printf '%s' "$payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/output.json"
-grep -q 'Workspace knowledge index:' "$test_root/output.json"
+grep -q 'Wiki Preflight owns scoped knowledge retrieval' "$test_root/output.json"
+grep -q 'Wiki Preflight runtime:' "$test_root/output.json"
+! grep -q '_index.md' "$test_root/output.json"
+python3 - "$test_root/output.json" <<'PY'
+import json
+import sys
+
+context = json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"]
+assert len(context.encode("utf-8")) <= 6000
+PY
 resolve=$(HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/scripts/wiki_ambient.py" resolve --cwd "$workspace")
 printf '%s' "$resolve" | grep -q '"local_wiki":'
 printf '%s' "$resolve" | grep -q '"local_wiki_status": "valid"'
@@ -59,7 +71,7 @@ esac
 grep -q '^type: articles$' "$stable_raw"
 grep -q '^knowledge_readiness: ready$' "$stable_raw"
 
-durable_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable-durable","turn_id":"one","prompt":"Research and synthesize the cache-free runtime result"}' "$workspace")
+durable_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable-durable","turn_id":"one","prompt":"Synthesize the cache-free runtime result"}' "$workspace")
 printf '%s' "$durable_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >/dev/null
 printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"stable-durable","turn_id":"one","last_assistant_message":"Cache-free durable capture"}' "$workspace" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/durable-stop.json"
 grep -q '"hookEventName": "Stop"' "$test_root/durable-stop.json"
@@ -74,7 +86,7 @@ test -f "$capture"
 
 caption_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable","turn_id":"caption","prompt":"Riset video https://youtu.be/dQw4w9WgXcQ"}' "$workspace")
 printf '%s' "$caption_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/caption-context.json"
-caption_context=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"].split("Workspace knowledge index:", 1)[-1])' "$test_root/caption-context.json")
+caption_context=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["hookSpecificOutput"]["additionalContext"])' "$test_root/caption-context.json")
 printf '%s' "$caption_context" | grep -q 'Knowledge ready for ordinary use'
 printf '%s' "$caption_context" | grep -q 'basis=caption material'
 ! printf '%s' "$caption_context" | grep -Eq 'caption_evidence=|receipt_id=|caption_sha256=|transcript=eligible|evidence_status=|queue:'
@@ -85,6 +97,11 @@ printf '%s' "$boundary_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN
 grep -q 'Usage note: treat this as a production mutation' "$test_root/boundary-context.json"
 grep -q 'Source material is unavailable' "$test_root/boundary-context.json"
 mv "$fallback_vendor" "$data_root/current/vendor"
+if [ "${WIKI_P1_TRACE:-0}" = 1 ]; then
+  sh -x "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/universal-preflight.sh" "$data_root/current"
+else
+  sh "$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/universal-preflight.sh" "$data_root/current"
+fi
 
 set_version() {
   root=$1

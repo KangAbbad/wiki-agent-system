@@ -1,7 +1,7 @@
 {
   "name": "wiki-preflight",
-  "version": "0.12.0",
-  "description": "Loads repository-scoped wiki knowledge before Codex work.",
+  "version": "0.13.0",
+  "description": "Loads relevant Workspace and User Wiki knowledge before Codex work.",
   "author": {
     "name": "kangabbad"
   },
@@ -9,11 +9,11 @@
   "interface": {
     "displayName": "Wiki Preflight",
     "shortDescription": "Automate repository and user-scope LLM Wiki work.",
-    "longDescription": "Injects repository wiki preflight context and ships ambient LLM Wiki policy for projectless work.",
+    "longDescription": "Checks relevant Workspace and User Wiki knowledge before every prompt, with bounded context and automatic capture.",
     "developerName": "kangabbad",
     "category": "Productivity",
     "capabilities": [],
     "websiteURL": "https://github.com/KangAbbad/wiki-agent-system",
-    "defaultPrompt": "Use wiki preflight for this repository."
+    "defaultPrompt": "Use scoped Wiki knowledge for this work."
   }
 }

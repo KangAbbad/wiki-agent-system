@@ -12,8 +12,9 @@ import sys
 import tempfile
 import time
 import uuid
+import unicodedata
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
 sys.dont_write_bytecode = True
@@ -60,12 +61,36 @@ RETRIEVAL_MAX_RESULTS = 5
 RETRIEVAL_MAX_BYTES = 6000
 RETRIEVAL_MAX_FILE_BYTES = 32768
 MIGRATION_MAX_SOURCE_BYTES = 2 * 1024 * 1024
+
+
+def configured_user_wiki_root():
+    home = Path.home()
+    config = home / ".config" / "llm-wiki" / "config.json"
+    if not config.exists():
+        return home / "wiki"
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    value = data.get("hub_path") or data.get("resolved_path")
+    if not value:
+        return home / "wiki"
+    if not isinstance(value, str):
+        return None
+    if value == "~":
+        return home
+    if value.startswith("~/"):
+        value = str(home / value[2:])
+    path = Path(value)
+    return path if path.is_absolute() else None
 RETRIEVAL_SIGNALS = {
-    "continuation": re.compile(r"\b(?:continue|resume|previous|earlier|last time|as before|pick up)\b", re.I),
-    "prior-decision": re.compile(r"\b(?:decision|decided|rationale|trade[- ]?off|agreed|why did we)\b", re.I),
-    "research": re.compile(r"\b(?:research|investigat|evidence|source|paper|spec(?:ification)?|reference)\b", re.I),
-    "architecture": re.compile(r"\b(?:architect(?:ure)?|design|schema|migration|component|integration)\b", re.I),
-    "repeated-investigation": re.compile(r"\b(?:same (?:bug|issue|problem)|regression|revisit|historical)\b", re.I),
+    "continuation": re.compile(r"\b(?:continue|resume|previous|earlier|last time|as before|pick up|lanjut(?:kan)?|sebelumnya|sesi lalu|kemarin|tadi)\b", re.I),
+    "prior-decision": re.compile(r"\b(?:decision|decided|rationale|trade[- ]?off|agreed|why did we|keputusan|memutuskan|alasan|sepakat)\b", re.I),
+    "research": re.compile(r"\b(?:research|investigat|evidence|source|paper|spec(?:ification)?|reference|riset|teliti|investigasi|bukti|sumber|referensi|makalah)\b", re.I),
+    "architecture": re.compile(r"\b(?:architect(?:ure)?|design|schema|migration|component|integration|arsitektur|desain|skema|migrasi|komponen|integrasi)\b", re.I),
+    "repeated-investigation": re.compile(r"\b(?:same (?:bug|issue|problem)|regression|revisit|historical|masalah yang sama|bug yang sama|regresi|riwayat)\b", re.I),
 }
 CAPTURE_INTENT_SIGNALS = {
     **RETRIEVAL_SIGNALS,
@@ -84,18 +109,16 @@ CAPTURE_INTENT_SIGNALS = {
     "plan": re.compile(r"\b(?:plan|planning|roadmap|rencana|rencanakan)\b", re.I),
 }
 RETRIEVAL_STOPWORDS = {
+    "a", "ada", "again", "akan", "an", "apa", "apakah", "at", "baik", "bagaimana", "bantu", "been", "belum", "bisa", "by", "can", "coba", "could", "dalam", "dari", "dengan", "dua", "for", "help", "in", "ini", "is", "it", "itu", "iya", "kenapa", "kita", "lagi", "lanjut", "lanjutkan", "mana", "me", "mengapa", "my", "of", "oke", "on", "or", "our", "pada", "perlu", "please", "redacted", "satu", "saya", "sebuah", "sekarang", "semua", "setiap", "setuju", "should", "sudah", "tentang", "the", "tiga", "to", "tolong", "untuk", "we", "yang", "ya", "you", "your",
     "about",
-    "again",
     "after",
     "and",
     "are",
-    "been",
     "before",
     "from",
     "have",
     "into",
     "that",
-    "the",
     "this",
     "with",
     "what",
@@ -104,6 +127,31 @@ RETRIEVAL_STOPWORDS = {
     "which",
     "will",
     "would",
+}
+RETRIEVAL_SYNONYMS = {
+    "bug": {"defect", "issue", "masalah"},
+    "defect": {"bug", "issue", "masalah"},
+    "masalah": {"bug", "defect", "issue"},
+    "decision": {"keputusan", "choice"},
+    "keputusan": {"decision", "choice"},
+    "documentation": {"docs", "dokumentasi"},
+    "dokumentasi": {"docs", "documentation"},
+    "fix": {"perbaikan", "repair"},
+    "perbaikan": {"fix", "repair"},
+    "knowledge": {"kb", "wiki", "pengetahuan"},
+    "pengetahuan": {"knowledge", "wiki"},
+    "memory": {"memori", "knowledge"},
+    "memori": {"memory", "knowledge"},
+    "plan": {"rencana", "roadmap"},
+    "rencana": {"plan", "roadmap"},
+    "retrieve": {"search", "lookup", "cari"},
+    "search": {"retrieve", "lookup", "cari"},
+    "cari": {"retrieve", "search", "lookup"},
+    "save": {"store", "simpan", "persist"},
+    "store": {"save", "simpan", "persist"},
+    "simpan": {"save", "store", "persist"},
+    "setup": {"install", "configure"},
+    "install": {"setup", "configure"},
 }
 CAPTURE_MESSAGE_MAX_CHARS = 12000
 CAPTURE_SECTION_MAX_CHARS = 3000
@@ -145,10 +193,11 @@ def git_root(path: Path):
 
 
 def ensure_private_state_outside_git():
+    user_wiki = configured_user_wiki_root()
     targets = {
         "home": Path.home(),
         "user configuration": USER_CONFIG,
-        "user Wiki": Path.home() / "wiki",
+        "user Wiki": user_wiki or Path.home() / "wiki",
     }
     for label, path in targets.items():
         repository = git_root(path)
@@ -266,15 +315,134 @@ def save(data):
 def wiki_status(root):
     if root is None:
         return "absent"
-    required = ("config.md", "_index.md", "raw", "wiki")
-    return "valid" if all((root / item).exists() for item in required) else "foreign"
+    if root.is_symlink() or not root.is_dir():
+        return "foreign"
+    required = (("config.md", True), ("_index.md", True), ("raw", False), ("wiki", False))
+    for name, is_file in required:
+        path = root / name
+        if path.is_symlink() or (not path.is_file() if is_file else not path.is_dir()):
+            return "foreign"
+    return "valid"
+
+
+def find_local_wiki(path: Path, data=None):
+    path = path.expanduser().resolve()
+    if path_scope(path) != "workspace":
+        return None
+    data = data or load()
+    boundary = git_root(path)
+    if boundary is None:
+        matches = [
+            Path(workspace).resolve()
+            for workspace in data["workspace_topics"]
+            if path.is_relative_to(Path(workspace).resolve())
+        ]
+        boundary = max(matches, key=lambda item: len(item.parts)) if matches else path
+    root = boundary / ".wiki"
+    return root if root.exists() or root.is_symlink() else None
+
+
+def path_scope(path: Path) -> str:
+    """Use Codex's cwd as the workspace anchor, except known user-data roots."""
+    home = Path.home().resolve()
+    if path == Path("/") or path == home:
+        return "user"
+    codex_worktrees = home / ".codex" / "worktrees"
+    if path.is_relative_to(codex_worktrees) and git_root(path) is not None:
+        return "workspace"
+    private_roots = [
+        home / ".codex",
+        home / ".config",
+        home / "Library",
+        home / "wiki",
+    ]
+    configured_wiki = configured_user_wiki_root()
+    if configured_wiki is not None:
+        private_roots.append(configured_wiki)
+    xdg_config = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config")).expanduser()
+    private_roots.append(xdg_config.resolve())
+    for root in private_roots:
+        try:
+            if path == root or path.is_relative_to(root.resolve()):
+                return "user"
+        except OSError:
+            continue
+    return "workspace"
+
+
+def user_wiki_status(root: Path) -> str:
+    if root is None:
+        return "foreign"
+    if root.is_symlink():
+        return "foreign"
+    if not root.exists():
+        return "absent"
+    index = root / "_index.md"
+    if not root.is_dir() or index.is_symlink() or not index.is_file():
+        return "foreign"
+    for name in ("topics", "raw", "wiki"):
+        child = root / name
+        if child.exists() and (child.is_symlink() or not child.is_dir()):
+            return "foreign"
+    return "valid" if any((root / name).is_dir() for name in ("topics", "raw", "wiki")) else "foreign"
+
+
+def initialize_user_wiki() -> str:
+    root = configured_user_wiki_root()
+    if root is None:
+        return "config-invalid"
+    try:
+        ensure_private_state_outside_git()
+    except SystemExit:
+        return "private-boundary"
+    if root.is_symlink():
+        return "foreign"
+    if not root.parent.is_dir():
+        return "parent-unavailable"
+    lock = USER_CONFIG.parent / "state" / "user-wiki-bootstrap.lock"
+    lock_fd, reason = acquire_file_lock(lock, 0.5)
+    if lock_fd is None:
+        return reason or "lock-unavailable"
+    try:
+        if root.is_symlink():
+            return "foreign"
+        allowed = {"_index.md", "config.md", "wikis.json", "raw", "wiki", "topics", "output", "inbox", ".sessions"}
+        if root.exists():
+            if not root.is_dir():
+                return "foreign"
+            try:
+                entries = {item.name for item in root.iterdir()}
+            except OSError:
+                return "unavailable"
+            if not entries or not entries <= allowed or not ({".sessions", "_index.md", "raw", "wiki", "topics"} & entries):
+                return "foreign"
+            for name in entries & (allowed - {"_index.md", "config.md", "wikis.json"}):
+                item = root / name
+                if item.is_symlink() or not item.is_dir():
+                    return "foreign"
+            for name in entries & {"_index.md", "config.md", "wikis.json"}:
+                item = root / name
+                if item.is_symlink() or not item.is_file():
+                    return "foreign"
+        else:
+            root.mkdir(mode=0o700)
+        for name in ("raw", "wiki", "topics", "output", "inbox"):
+            (root / name).mkdir(mode=0o700, exist_ok=True)
+        if not (root / "_index.md").exists():
+            atomic_write(root / "_index.md", "# User Wiki\n\n## Knowledge\n\n- [Topics](topics/)\n- [Raw sources](raw/)\n- [Articles](wiki/)\n- [Plans and reports](output/)\n")
+        return user_wiki_status(root)
+    except OSError:
+        return "unavailable"
+    finally:
+        release_file_lock(lock_fd)
 
 
 def resolve(cwd: str):
     data = load()
     path = Path(cwd).resolve()
-    local_root = next((candidate / ".wiki" for candidate in (path, *path.parents) if (candidate / ".wiki").is_dir()), None)
-    matches = [(Path(workspace), topic) for workspace, topic in data["workspace_topics"].items() if path.is_relative_to(Path(workspace))]
+    scope = path_scope(path)
+    local_root = find_local_wiki(path, data) if scope == "workspace" else None
+    matches = [(Path(workspace), topic) for workspace, topic in data["workspace_topics"].items() if scope == "workspace" and path.is_relative_to(Path(workspace))]
     if matches:
         topic = max(matches, key=lambda item: len(item[0].parts))[1]
         reason = "workspace"
@@ -284,7 +452,7 @@ def resolve(cwd: str):
         candidates = sorted(topic for topic, metadata in data["topics"].items() if {topic, *metadata["aliases"]} & names)
         topic = candidates[0] if len(candidates) == 1 else None
         reason = "alias" if topic else None
-    print(json.dumps({"enabled": data["enabled"], "cwd": str(path), "topic": topic, "reason": reason, "candidates": candidates, "local_wiki": str(local_root) if local_root else None, "local_wiki_status": wiki_status(local_root)}))
+    print(json.dumps({"enabled": data["enabled"], "cwd": str(path), "scope": scope, "topic": topic, "reason": reason, "candidates": candidates, "local_wiki": str(local_root) if local_root else None, "local_wiki_status": wiki_status(local_root)}))
 
 
 def redact(value: str) -> str:
@@ -696,7 +864,9 @@ def workspace_identity(route: dict, workspace: Path) -> Path:
 def capture_destination(scope: str, route: dict) -> Path:
     if scope == "workspace":
         return Path(route["local_wiki"]) / "inbox" / "autosave"
-    user_root = (Path.home() / "wiki").resolve()
+    user_root = Path(route["user_wiki"]).resolve() if route.get("user_wiki") else configured_user_wiki_root()
+    if user_root is None:
+        raise SystemExit("configured User Wiki path is unavailable")
     if scope == "user":
         if route["topic"] and (user_root / "topics" / route["topic"]).is_dir():
             return user_root / "topics" / route["topic"] / "inbox" / "autosave"
@@ -710,7 +880,9 @@ def capture_lock_path(scope: str, route: dict) -> Path:
     if scope == "workspace":
         root = Path(route["local_wiki"]).resolve()
     else:
-        root = (Path.home() / "wiki").resolve()
+        root = Path(route["user_wiki"]).resolve() if route.get("user_wiki") else configured_user_wiki_root()
+        if root is None:
+            raise SystemExit("configured User Wiki path is unavailable")
     return root / ".sessions" / "wiki-agent-system" / "capture.lock"
 
 
@@ -936,12 +1108,21 @@ confidence: {confidence}
 {lines(open_questions)}
 """
         quota = None
-        if scope == "workspace":
+        if scope in {"workspace", "uncertain"}:
+            quota_root = (
+                Path(route["local_wiki"])
+                if scope == "workspace"
+                else Path(route["user_wiki"]).resolve() if route.get("user_wiki") else configured_user_wiki_root()
+            )
+            if quota_root is None:
+                raise SystemExit("configured User Wiki path is unavailable")
             existing_bytes = output.stat().st_size if output.exists() else 0
-            storage = storage_report(Path(route["local_wiki"]))
+            storage = storage_report(quota_root)
             projected = storage["total_bytes"] - existing_bytes + len(content.encode("utf-8"))
-            quota = quota_status(data, Path(route["local_wiki"]), projected, storage)
-            if quota["level"] == "block" and len(content.encode("utf-8")) > 256 * 1024:
+            quota = quota_status(data, quota_root, projected, storage)
+            if scope == "uncertain" and quota["level"] == "block":
+                raise SystemExit("User Wiki quota blocks uncertain-scope capture")
+            if scope == "workspace" and quota["level"] == "block" and len(content.encode("utf-8")) > 256 * 1024:
                 raise SystemExit("workspace wiki quota blocks this large capture; run retention report and quarantine expired operational data")
         atomic_write(output, content)
         return {"path": str(output), "topic": route["topic"], "scope": scope, "canonical_uri": canonical_uri, "status": "updated" if previous else "pending-curation", "quota": quota}
@@ -1438,12 +1619,130 @@ def migrate_canonical_evidence(cwd: str):
 
 def intent_gate(prompt: str) -> dict:
     text = redact(str(prompt or "")).strip()
+    text = re.sub(r"https?://\S+|www\.\S+", " ", text, flags=re.I)
+    text = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", " ", text)
+    text = re.sub(r"(?:(?:[A-Za-z]:)?[/\\](?:Users|home|private|tmp|var|Volumes)(?:[/\\][^\s]+)*)", " ", text, flags=re.I)
     signals = [name for name, pattern in RETRIEVAL_SIGNALS.items() if pattern.search(text)]
     tokens = []
-    for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", text.lower()):
+    for token in re.findall(r"[^\W_][\w-]{1,}", text.lower()):
+        token = normalize_retrieval_token(token)
         if token not in RETRIEVAL_STOPWORDS and token not in tokens:
             tokens.append(token)
-    return {"matched": bool(signals), "signals": signals, "query": " ".join(tokens[:24])}
+    return {"matched": bool(tokens), "signals": signals, "query": " ".join(tokens[:24])}
+
+
+def normalize_retrieval_token(token: str) -> str:
+    value = unicodedata.normalize("NFKD", token.casefold())
+    return "".join(character for character in value if not unicodedata.combining(character))
+
+
+def retrieval_token_forms(token: str) -> set[str]:
+    token = normalize_retrieval_token(token)
+    forms = {token}
+    if len(token) > 6 and token.endswith("ies"):
+        forms.add(token[:-3] + "y")
+    for suffix in ("ing", "ed", "kan", "nya", "lah", "kah", "an", "i", "s"):
+        if len(token) - len(suffix) >= 4 and token.endswith(suffix):
+            stem = token[:-len(suffix)]
+            if suffix in {"ing", "ed"} and len(stem) > 2 and stem[-1] == stem[-2]:
+                stem = stem[:-1]
+            forms.add(stem)
+            break
+    for prefix, replacement in (("meny", "s"), ("peny", "s"), ("meng", ""), ("peng", ""), ("men", ""), ("pen", ""), ("mem", ""), ("pem", ""), ("ber", ""), ("ter", ""), ("per", "")):
+        if token.startswith(prefix) and len(token) - len(prefix) >= 4:
+            forms.add(replacement + token[len(prefix):])
+            break
+    for form in tuple(forms):
+        forms.update(RETRIEVAL_SYNONYMS.get(form, ()))
+    return forms
+
+
+def one_edit_apart(left: str, right: str) -> bool:
+    if left == right or min(len(left), len(right)) < 6 or abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) > len(right):
+        left, right = right, left
+    i = j = edits = 0
+    while i < len(left) and j < len(right):
+        if left[i] == right[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        if len(left) == len(right):
+            i += 1
+            j += 1
+        else:
+            j += 1
+    return edits + (j < len(right) or i < len(left)) <= 1
+
+
+def retrieval_match(query_tokens: list[str], content: str, title: str = "") -> tuple[int, int]:
+    body_words = {normalize_retrieval_token(token) for token in re.findall(r"[^\W_][\w-]{1,}", content.casefold())}
+    title_words = {normalize_retrieval_token(token) for token in re.findall(r"[^\W_][\w-]{1,}", title.casefold())}
+    matched = 0
+    score = 0
+    for query in query_tokens:
+        forms = retrieval_token_forms(query) - RETRIEVAL_STOPWORDS
+        if not forms:
+            continue
+        hit = forms & body_words
+        title_hit = forms & title_words
+        if not hit and len(query) >= 6:
+            fuzzy = any(one_edit_apart(query, word) for word in body_words if abs(len(query) - len(word)) <= 1)
+            if fuzzy:
+                hit = {query}
+        if hit:
+            matched += 1
+            score += 4 if title_hit else 1
+    return matched, score
+
+
+def retrieval_display_text(value, limit: int) -> str:
+    """Flatten untrusted Wiki fields before embedding them in hook context."""
+    text = redact(str(value or ""))
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.replace("<", "‹").replace(">", "›")[:limit]
+
+
+def retrieval_timestamp(fields: dict) -> float:
+    for name in ("valid_from", "updated_at", "updated", "created_at", "created", "ingested"):
+        value = fields.get(name)
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp()
+        except ValueError:
+            continue
+    return 0.0
+
+
+def retrieval_temporally_valid(fields: dict) -> bool:
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    for name in ("valid_from", "valid_until"):
+        value = fields.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            return False
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if len(value) == 10:
+            boundary = parsed.date()
+            if name == "valid_from" and boundary > today or name == "valid_until" and boundary < today:
+                return False
+            continue
+        parsed = parsed.replace(tzinfo=parsed.tzinfo or timezone.utc)
+        if name == "valid_from" and parsed > now or name == "valid_until" and parsed <= now:
+            return False
+    return True
 
 
 def capture_intent(prompt: str) -> dict:
@@ -1461,7 +1760,7 @@ def retrieval_roots(root: Path, user: bool) -> list[Path]:
     return [path for path in roots if path.is_dir()]
 
 
-def canonical_retrieval_record(path: Path, root: Path, source: str, tokens: list[str]):
+def canonical_retrieval_record(path: Path, root: Path, source: str, tokens: list[str], reference_uris=None):
     try:
         if path.stat().st_size > RETRIEVAL_MAX_FILE_BYTES:
             return None
@@ -1476,30 +1775,46 @@ def canonical_retrieval_record(path: Path, root: Path, source: str, tokens: list
             return None
     if fields.get("status") != "canonical" or not valid_canonical_uri(fields.get("canonical_uri")):
         return None
-    searchable = content.lower()
-    score = sum(searchable.count(token) for token in tokens)
-    if not score:
+    if not retrieval_temporally_valid(fields):
+        return None
+    uri_scope = urlparse(fields["canonical_uri"]).netloc
+    if source == "workspace" and uri_scope != "workspace":
+        return None
+    if source == "user" and uri_scope not in {"user", "personal"}:
         return None
     body = content.split("\n---", 1)[1] if content.startswith("---\n") and "\n---" in content else content
+    title = fields.get("title") or next((heading.strip() for heading in re.findall(r"^#\s+(.+)$", body, re.M)), path.stem)
+    referenced = fields["canonical_uri"] in (reference_uris or set())
+    matched, score = retrieval_match(tokens, body, str(title)) if tokens else (0, 0.0)
+    if not matched and not referenced:
+        return None
+    if referenced and not matched:
+        score = 0.01
     match = next((re.search(re.escape(token), body, re.I) for token in tokens if re.search(re.escape(token), body, re.I)), None)
     start = max(0, (match.start() if match else 0) - 120)
     snippet = re.sub(r"\s+", " ", redact(body[start:])).strip()[:480]
-    title = fields.get("title") or next((heading.strip() for heading in re.findall(r"^#\s+(.+)$", body, re.M)), path.stem)
     return {
         "source": source,
-        "path": path.relative_to(root).as_posix(),
-        "title": redact(str(title))[:160],
-        "snippet": snippet,
+        "path": retrieval_display_text(path.relative_to(root).as_posix(), 240),
+        "title": retrieval_display_text(title, 160),
+        "snippet": retrieval_display_text(snippet, 480),
         "canonical_uri": fields["canonical_uri"],
+        "valid_from": fields.get("valid_from"),
+        "valid_until": fields.get("valid_until"),
+        "updated_at": fields.get("updated_at") or fields.get("updated"),
         "score": score,
+        "freshness": retrieval_timestamp(fields),
         "confidence": "canonical",
+        "_content_fingerprint": hashlib.sha256(body.encode("utf-8")).hexdigest(),
     }
 
 
-def bounded_canonical_retrieval(root: Path, source: str, user: bool, tokens: list[str], limit: int, timeout: float) -> tuple[list[dict], str]:
+def bounded_canonical_retrieval(root: Path, source: str, user: bool, tokens: list[str], limit: int, timeout: float, reference_uris=None) -> tuple[list[dict], str]:
     deadline = time.monotonic() + timeout
     results = []
     seen = set()
+    if not tokens and not reference_uris:
+        return results, "ok"
     for base in retrieval_roots(root, user):
         try:
             paths = base.rglob("*.md")
@@ -1510,12 +1825,155 @@ def bounded_canonical_retrieval(root: Path, source: str, user: bool, tokens: lis
                 if resolved in seen or not resolved.is_relative_to(root):
                     continue
                 seen.add(resolved)
-                record = canonical_retrieval_record(resolved, root, source, tokens)
+                record = canonical_retrieval_record(resolved, root, source, tokens, reference_uris)
                 if record:
                     results.append(record)
         except OSError:
             continue
-    return sorted(results, key=lambda item: (-item["score"], item["path"]))[:limit], "ok"
+    return sorted(results, key=lambda item: (-item["score"], -item["freshness"], item["path"]))[:limit], "ok"
+
+
+def bounded_output_retrieval(root: Path, source: str, user: bool, tokens: list[str], deadline: float, reference_paths=None) -> tuple[list[dict], str]:
+    bases = [root / "output"]
+    if user and (root / "topics").is_dir():
+        bases.extend(topic / "output" for topic in sorted((root / "topics").iterdir()) if topic.is_dir())
+    results = []
+    seen = set()
+    for relative in sorted(reference_paths or set()):
+        if time.monotonic() >= deadline:
+            return results[:2], "timeout"
+        try:
+            resolved = (root / relative).resolve()
+            if not resolved.is_relative_to(root) or resolved in seen or resolved.suffix.lower() != ".md" or resolved.name == "_index.md" or resolved.stat().st_size > RETRIEVAL_MAX_FILE_BYTES:
+                continue
+            content = resolved.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        seen.add(resolved)
+        title = next((heading.strip() for heading in re.findall(r"^#\s+(.+)$", content, re.M)), resolved.stem)
+        results.append({
+            "source": f"{source}-output",
+            "path": retrieval_display_text(resolved.relative_to(root).as_posix(), 240),
+            "title": retrieval_display_text(title, 160),
+            "snippet": retrieval_display_text(content, 320),
+            "score": 0.01,
+            "kind": "task-artifact",
+        })
+    if not tokens:
+        return results[:2], "ok"
+    for base in bases:
+        if not base.is_dir():
+            continue
+        for path in base.rglob("*.md"):
+            if time.monotonic() >= deadline:
+                return sorted(results, key=lambda item: (-item["score"], item["path"]))[:2], "timeout"
+            if path.name == "_index.md":
+                continue
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root) or resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                if resolved.stat().st_size > RETRIEVAL_MAX_FILE_BYTES:
+                    continue
+                content = resolved.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+            title = next((heading.strip() for heading in re.findall(r"^#\s+(.+)$", content, re.M)), resolved.stem)
+            relative = resolved.relative_to(root).as_posix()
+            referenced = relative in (reference_paths or set())
+            matched, score = retrieval_match(tokens, content, f"{title} {relative}") if tokens else (0, 0.0)
+            if not referenced and (matched < 2 and not (len(tokens) == 1 and matched and len(tokens[0]) >= 6)):
+                continue
+            if referenced and not matched:
+                score = 0.01
+            results.append({
+                "source": f"{source}-output",
+                "path": retrieval_display_text(relative, 240),
+                "title": retrieval_display_text(title, 160),
+                "snippet": retrieval_display_text(content, 320),
+                "score": score,
+                "kind": "task-artifact",
+            })
+    return sorted(results, key=lambda item: (-item["score"], item["path"]))[:2], "ok"
+
+
+def bounded_pending_retrieval(root: Path, tokens: list[str], deadline: float, source: str = "workspace-pending", user: bool = False, reference_paths=None) -> tuple[list[dict], str]:
+    bases = [root / "inbox" / "autosave"]
+    topics = root / "topics"
+    if user and topics.is_dir() and not topics.is_symlink():
+        try:
+            bases.extend(topic / "inbox" / "autosave" for topic in sorted(topics.iterdir()) if topic.is_dir() and not topic.is_symlink())
+        except OSError:
+            return [], "unavailable"
+    results = []
+    seen = set()
+    status = "ok"
+    for relative in sorted(reference_paths or set()):
+        if time.monotonic() >= deadline:
+            return results[:2], "timeout"
+        candidate = root / relative
+        if candidate.is_symlink():
+            continue
+        try:
+            resolved = candidate.resolve()
+            if not resolved.is_relative_to(root) or resolved in seen or resolved.suffix.lower() != ".md" or resolved.stat().st_size > RETRIEVAL_MAX_FILE_BYTES:
+                continue
+            content = resolved.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if "status: pending-curation" not in content[:1200]:
+            continue
+        body = content.split("\n---", 1)[1] if content.startswith("---\n") and "\n---" in content else content
+        relative_path = resolved.relative_to(root).as_posix()
+        results.append({
+            "source": source,
+            "path": retrieval_display_text(relative_path, 240),
+            "snippet": retrieval_display_text(body, 320),
+            "score": 0.01,
+            "kind": "pending-curation",
+        })
+        seen.add(resolved)
+    if not tokens:
+        return results[:2], status
+    for base in bases:
+        if not base.is_dir() or base.is_symlink():
+            continue
+        try:
+            for path in base.glob("*.md"):
+                if time.monotonic() >= deadline:
+                    return sorted(results, key=lambda item: (-item["score"], item["path"]))[:2], "timeout"
+                if path.is_symlink():
+                    continue
+                try:
+                    resolved = path.resolve()
+                    if not resolved.is_relative_to(root) or resolved in seen or resolved.stat().st_size > RETRIEVAL_MAX_FILE_BYTES:
+                        continue
+                    seen.add(resolved)
+                    content = resolved.read_text(encoding="utf-8")
+                except (OSError, UnicodeError):
+                    continue
+                if "status: pending-curation" not in content[:1200]:
+                    continue
+                body = content.split("\n---", 1)[1] if content.startswith("---\n") and "\n---" in content else content
+                relative = resolved.relative_to(root).as_posix()
+                referenced = relative in (reference_paths or set())
+                matched, score = retrieval_match(tokens, body) if tokens else (0, 0.0)
+                if not referenced and (matched < 2 and not (len(tokens) == 1 and matched and len(tokens[0]) >= 6)):
+                    continue
+                if referenced and not matched:
+                    score = 0.01
+                results.append({
+                    "source": source,
+                    "path": retrieval_display_text(relative, 240),
+                    "snippet": retrieval_display_text(body, 320),
+                    "score": score,
+                    "kind": "pending-curation",
+                })
+        except OSError:
+            status = "unavailable"
+            continue
+    return sorted(results, key=lambda item: (-item["score"], item["path"]))[:2], status
 
 
 def trim_retrieval_results(results: list[dict], limit: int, max_bytes: int) -> list[dict]:
@@ -1530,26 +1988,121 @@ def trim_retrieval_results(results: list[dict], limit: int, max_bytes: int) -> l
     return selected
 
 
-def retrieve_memory(cwd: str, prompt: str, limit: int = RETRIEVAL_MAX_RESULTS, max_bytes: int = RETRIEVAL_MAX_BYTES, timeout: float = MNEMOSYNE_TIMEOUT_SECONDS) -> dict:
+def mark_possible_retrieval_conflicts(results: list[dict]) -> None:
+    by_title = {}
+    for item in results:
+        if item.get("confidence") != "canonical":
+            continue
+        title = re.sub(r"[^\w]+", " ", normalize_retrieval_token(item.get("title", ""))).strip()
+        if title:
+            by_title.setdefault(title, []).append(item)
+    for records in by_title.values():
+        if len(records) > 1 and len({item.get("_content_fingerprint") for item in records}) > 1:
+            for item in records:
+                item["possible_conflict"] = True
+    for item in results:
+        item.pop("_content_fingerprint", None)
+
+
+def retrieve_memory(cwd: str, prompt: str, limit: int = RETRIEVAL_MAX_RESULTS, max_bytes: int = RETRIEVAL_MAX_BYTES, timeout: float = MNEMOSYNE_TIMEOUT_SECONDS, workspace_allowed: bool = True, continuity_refs=None) -> dict:
     gate = intent_gate(prompt)
-    result = {"status": "abstained", "intent": gate, "results": [], "diagnostics": []}
-    if not gate["matched"] or not gate["query"]:
-        result["reason"] = "no-intent-signal"
-        return result
     route = json.loads(capture_resolve(cwd))
+    deadline = time.monotonic() + timeout
+    normalized_refs = []
+    for ref in continuity_refs or []:
+        if isinstance(ref, str) and len(ref) <= 240 and valid_canonical_uri(ref):
+            ref = {"kind": "canonical", "uri": ref}
+        if not isinstance(ref, dict):
+            continue
+        if ref.get("kind") == "canonical" and set(ref) == {"kind", "uri"} and isinstance(ref.get("uri"), str) and valid_canonical_uri(ref["uri"]):
+            normalized_refs.append({"kind": "canonical", "uri": ref["uri"]})
+        elif ref.get("kind") in {"task-artifact", "pending-capture"} and set(ref) == {"kind", "scope", "path"} and ref.get("scope") in {"workspace", "user"} and isinstance(ref.get("path"), str):
+            path = ref["path"]
+            parsed = PurePosixPath(path)
+            if len(path) > 240 or parsed.is_absolute() or "\\" in path or any(part in {"", ".", ".."} for part in parsed.parts):
+                continue
+            if ref["kind"] == "task-artifact":
+                allowed_prefix = path.startswith("output/") or re.fullmatch(r"topics/[a-z0-9][a-z0-9-]{0,62}/output/.+", path) is not None
+            else:
+                allowed_prefix = path.startswith("inbox/autosave/") or re.fullmatch(r"topics/[a-z0-9][a-z0-9-]{0,62}/inbox/autosave/.+", path) is not None
+            if allowed_prefix:
+                normalized_refs.append({"kind": ref["kind"], "scope": ref["scope"], "path": path})
+    normalized_refs = list({json.dumps(ref, sort_keys=True): ref for ref in normalized_refs}.values())[:5]
+    canonical_refs = {ref["uri"] for ref in normalized_refs if ref["kind"] == "canonical"}
+    artifact_refs = {
+        scope: {ref["path"] for ref in normalized_refs if ref["kind"] == "task-artifact" and ref["scope"] == scope}
+        for scope in ("workspace", "user")
+    }
+    pending_refs = {
+        scope: {ref["path"] for ref in normalized_refs if ref["kind"] == "pending-capture" and ref["scope"] == scope}
+        for scope in ("workspace", "user")
+    }
+    user_root = Path(route["user_wiki"]) if route.get("user_wiki") else None
+    user_status = route.get("user_wiki_status", "foreign")
+    result = {
+        "status": "checked-no-match",
+        "scope": route["scope"],
+        "intent": gate,
+        "results": [],
+        "task_artifacts": [],
+        "pending_captures": [],
+        "diagnostics": [],
+        "sources_checked": {"workspace": route["local_wiki_status"], "user": user_status},
+    }
+    if not gate["query"]:
+        if normalized_refs:
+            result["reason"] = "continuity-reference-no-match"
+        else:
+            result["status"] = "unavailable"
+            result["reason"] = "no-content-terms"
+            result["diagnostics"].append({"source": "query", "status": "no-content-terms", "count": 0})
+            return result
     tokens = gate["query"].split()
     results = []
-    if route["local_wiki_status"] == "valid":
-        local_results, status = bounded_canonical_retrieval(Path(route["local_wiki"]), "workspace", False, tokens, limit, timeout)
+    incomplete = False
+    if workspace_allowed and route["scope"] == "workspace" and route["local_wiki_status"] == "valid":
+        local_results, status = bounded_canonical_retrieval(Path(route["local_wiki"]), "workspace", False, tokens, limit, max(0, deadline - time.monotonic()), canonical_refs)
         results.extend(local_results)
+        incomplete = status != "ok"
         result["diagnostics"].append({"source": "workspace", "status": status, "count": len(local_results)})
-    user_root = (Path.home() / "wiki").resolve()
-    if len(results) < limit and user_root.is_dir():
-        user_results, status = bounded_canonical_retrieval(user_root, "user", True, tokens, limit - len(results), timeout)
+    elif route["scope"] == "workspace" and (not workspace_allowed or route["local_wiki_status"] == "foreign"):
+        incomplete = True
+        result["diagnostics"].append({"source": "workspace", "status": "read-only", "count": 0})
+    elif route["scope"] == "workspace":
+        incomplete = True
+        result["diagnostics"].append({"source": "workspace", "status": "absent", "count": 0})
+    if user_status == "valid" and time.monotonic() < deadline:
+        user_results, status = bounded_canonical_retrieval(user_root, "user", True, tokens, limit, max(0, deadline - time.monotonic()), canonical_refs)
         results.extend(user_results)
+        incomplete = incomplete or status != "ok"
         result["diagnostics"].append({"source": "user", "status": status, "count": len(user_results)})
-    if len(results) < limit:
-        memory = mnemosyne_recall(gate["query"], min(2, limit - len(results)), timeout)
+    elif user_status == "foreign":
+        incomplete = True
+        result["diagnostics"].append({"source": "user", "status": "foreign", "count": 0})
+    elif route["scope"] == "user":
+        incomplete = True
+        result["diagnostics"].append({"source": "user", "status": "absent", "count": 0})
+    artifact_roots = []
+    if workspace_allowed and route["scope"] == "workspace" and route["local_wiki_status"] == "valid":
+        artifact_roots.append(("workspace", Path(route["local_wiki"]), False))
+    if user_status == "valid":
+        artifact_roots.append(("user", user_root, True))
+    for source, root, user in artifact_roots:
+        if len(result["task_artifacts"]) >= 2 or time.monotonic() >= deadline:
+            continue
+        artifacts, status = bounded_output_retrieval(root, source, user, tokens, deadline, artifact_refs[source])
+        result["task_artifacts"].extend(artifacts[:2 - len(result["task_artifacts"])])
+        incomplete = incomplete or status != "ok"
+    if workspace_allowed and route["scope"] == "workspace" and route["local_wiki_status"] == "valid" and time.monotonic() < deadline:
+        pending, status = bounded_pending_retrieval(Path(route["local_wiki"]), tokens, deadline, reference_paths=pending_refs["workspace"])
+        result["pending_captures"] = pending
+        incomplete = incomplete or status != "ok"
+    if user_status == "valid" and time.monotonic() < deadline:
+        pending, status = bounded_pending_retrieval(user_root, tokens, deadline, source="user-pending", user=True, reference_paths=pending_refs["user"])
+        result["pending_captures"].extend(pending[:max(0, 2 - len(result["pending_captures"]))])
+        incomplete = incomplete or status != "ok"
+    if len(results) < limit and gate["signals"] and time.monotonic() < deadline:
+        memory = mnemosyne_recall(gate["query"], min(2, limit - len(results)), max(0.1, deadline - time.monotonic()))
         result["diagnostics"].append({"source": "mnemosyne", **{key: value for key, value in memory.items() if key != "results" and key != "stdout"}})
         for item in memory.get("results", []):
             overlap = sum(token in item["content"].lower() for token in tokens)
@@ -1564,26 +2117,103 @@ def retrieve_memory(cwd: str, prompt: str, limit: int = RETRIEVAL_MAX_RESULTS, m
                 "score": item.get("score", 0),
                 "confidence": "hint",
             })
+    source_order = {"workspace": 0, "user": 1, "mnemosyne": 2}
+    results.sort(key=lambda item: (source_order.get(item["source"], 3), -item["score"], -item.get("freshness", 0), item.get("path") or ""))
     result["results"] = trim_retrieval_results(results, limit, max_bytes)
-    result["status"] = "ok" if result["results"] else "no-result"
-    if not result["results"]:
-        result["reason"] = "no-relevant-canonical-result"
+    mark_possible_retrieval_conflicts(result["results"][:3])
+    for item in result["results"]:
+        item.pop("_content_fingerprint", None)
+    result["status"] = "partial" if incomplete else "checked-with-results" if result["results"] or result["task_artifacts"] or result["pending_captures"] else "checked-no-match"
+    if not result["results"] and not result["task_artifacts"] and not result["pending_captures"]:
+        result["reason"] = "continuity-reference-no-match" if not tokens and normalized_refs else "no-relevant-canonical-result"
     return result
 
 
 def capture_resolve(cwd: str):
     data = load()
     path = Path(cwd).resolve()
-    local_root = next((candidate / ".wiki" for candidate in (path, *path.parents) if (candidate / ".wiki").is_dir()), None)
+    scope = path_scope(path)
+    local_root = find_local_wiki(path, data) if scope == "workspace" else None
+    user_root = configured_user_wiki_root()
+    user_status = user_wiki_status(user_root)
     matches = [(Path(workspace), topic) for workspace, topic in data["workspace_topics"].items() if path.is_relative_to(Path(workspace))]
-    if matches:
+    if scope == "workspace" and matches:
         topic = max(matches, key=lambda item: len(item[0].parts))[1]
+    elif scope == "user" and user_root is not None and path.is_relative_to(user_root.resolve()):
+        relative = path.relative_to(user_root.resolve())
+        topic = relative.parts[1] if len(relative.parts) > 1 and relative.parts[0] == "topics" and (user_root / "topics" / relative.parts[1]).is_dir() else None
     else:
         names = {candidate.name.lower().replace("_", "-") for candidate in (path, *path.parents)}
         candidates = sorted(topic for topic, metadata in data["topics"].items() if {topic, *metadata["aliases"]} & names)
         topic = candidates[0] if len(candidates) == 1 else None
-    workspace_root = local_root.parent if local_root else (max(matches, key=lambda item: len(item[0].parts))[0] if matches else None)
-    return json.dumps({"cwd": str(path), "topic": topic, "local_wiki": str(local_root) if local_root else None, "local_wiki_status": wiki_status(local_root), "workspace_root": str(workspace_root) if workspace_root else None})
+    workspace_root = None
+    if scope == "workspace":
+        workspace_root = local_root.parent if local_root else max(matches, key=lambda item: len(item[0].parts))[0] if matches else path
+    return json.dumps({"cwd": str(path), "scope": scope, "topic": topic, "local_wiki": str(local_root) if local_root else None, "local_wiki_status": wiki_status(local_root), "user_wiki": str(user_root.resolve()) if user_status == "valid" else None, "user_wiki_status": user_status, "workspace_root": str(workspace_root) if workspace_root else None})
+
+
+def initialize_workspace_wiki(cwd: str) -> str:
+    workspace = Path(cwd).resolve()
+    if path_scope(workspace) != "workspace":
+        return "user-scope"
+    ensure_private_state_outside_git()
+    lock_path = USER_CONFIG.parent / "state" / "wiki-bootstrap.lock"
+    lock_fd, reason = acquire_file_lock(lock_path, 0.5)
+    if lock_fd is None:
+        return reason or "lock-unavailable"
+    root = workspace / ".wiki"
+    try:
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            return "foreign"
+        marker = root / ".sessions" / "wiki-agent-system" / "marker.json"
+        if root.exists():
+            marker_parent = root
+            for name in (".sessions", "wiki-agent-system"):
+                marker_parent = marker_parent / name
+                if marker_parent.is_symlink() or (marker_parent.exists() and not marker_parent.is_dir()):
+                    return "foreign"
+            legacy = root / ".wiki-agent-system.json"
+            if marker.is_symlink() or legacy.is_symlink():
+                return "foreign"
+            existing_marker = marker if marker.exists() else legacy if legacy.exists() else None
+            if existing_marker is not None:
+                try:
+                    data = json.loads(existing_marker.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    return "foreign"
+                version = data.get("schema_version") if isinstance(data, dict) else None
+                if isinstance(data, dict) and data.get("owner") not in {None, "wiki-agent-system"}:
+                    return "foreign"
+                if type(version) is int and version > 2:
+                    return "future"
+                if version not in {1, 2}:
+                    return "foreign"
+                if existing_marker == marker and data.get("owner") != "wiki-agent-system":
+                    return "foreign"
+            elif wiki_status(root) != "valid":
+                return "foreign"
+        else:
+            root.mkdir(mode=0o700)
+            marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            atomic_write(marker, json.dumps({"schema_version": 2, "owner": "wiki-agent-system"}, sort_keys=True) + "\n")
+        for name in ("raw", "wiki", "output", "inbox"):
+            directory = root / name
+            if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+                return "foreign"
+            directory.mkdir(mode=0o700, exist_ok=True)
+        config = root / "config.md"
+        index = root / "_index.md"
+        if config.is_symlink() or index.is_symlink():
+            return "foreign"
+        if not config.exists():
+            atomic_write(config, "# Workspace Wiki\n")
+        if not index.exists():
+            atomic_write(index, "# Workspace Wiki\n\n## Knowledge\n\n- [Raw](raw/)\n- [Articles](wiki/)\n- [Output](output/)\n")
+        return wiki_status(root)
+    except (OSError, QueueError):
+        return "unavailable"
+    finally:
+        release_file_lock(lock_fd)
 
 
 def map_workspace(cwd: str, topic: str):

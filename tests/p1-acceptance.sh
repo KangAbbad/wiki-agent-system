@@ -3,15 +3,47 @@
 set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+source_codex_home=${CODEX_HOME:-${HOME}/.codex}
+test_environment=$(mktemp -d)
+trap 'rm -rf "$test_environment"' EXIT
+export HOME="$test_environment/home" XDG_CONFIG_HOME="$test_environment/config" CODEX_HOME="$test_environment/codex"
+export MNEMOSYNE_CLI="$test_environment/mnemosyne-not-installed" TMPDIR="$test_environment/tmp"
+export WIKI_TEST_CODEX_AUTH_FILE="$source_codex_home/auth.json"
+mkdir -p "$HOME" "$XDG_CONFIG_HOME" "$CODEX_HOME" "$TMPDIR"
 failed=0
+check_index=0
+
+run_check() {
+  if [ "${WIKI_P1_TRACE:-0}" != 1 ]; then
+    "$@"
+    return
+  fi
+  case "$1" in
+    sh)
+      shift
+      sh -x "$@"
+      ;;
+    from_root)
+      shift
+      from_root "$@"
+      ;;
+    *)
+      (set -x; "$@")
+      ;;
+  esac
+}
 
 check() {
   name=$1
   shift
-  if "$@"; then
+  check_index=$((check_index + 1))
+  output="$test_environment/check-$check_index.log"
+  if run_check "$@" >"$output" 2>&1; then
     printf 'PASS %s\n' "$name"
   else
-    printf 'FAIL %s\n' "$name" >&2
+    status=$?
+    printf 'FAIL %s (exit %s)\n' "$name" "$status" >&2
+    tail -n 80 "$output" >&2
     failed=1
   fi
 }
@@ -426,14 +458,20 @@ adapter_and_retrieval() (
   trap 'rm -rf "$test_root"' EXIT
   cp -R "$root/plugins/wiki-preflight" "$test_root/plugin"
   config_home="$test_root/config"
-  test_home="$test_root/home"
+  test_home="$test_root/home-alias"
+  test_home_target="$test_root/home-target"
   workspace="$test_root/workspace"
   fake="$test_root/fake-mnemosyne"
   log="$fake.log"
+  mkdir -p "$test_home_target"
+  ln -s "$test_home_target" "$test_home"
   export HOME="$test_home" XDG_CONFIG_HOME="$config_home"
-  mkdir -p "$workspace/.wiki/raw" "$workspace/.wiki/wiki" "$workspace/.wiki/inbox/autosave" "$test_home/wiki/topics/shared/wiki"
+  mkdir -p "$workspace/.wiki/raw" "$workspace/.wiki/wiki" "$workspace/.wiki/inbox/autosave" \
+    "$test_home/wiki/raw" "$test_home/wiki/wiki" "$test_home/wiki/topics/shared/wiki"
   printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/config.md"
   printf '%s\n' '# Workspace Wiki' >"$workspace/.wiki/_index.md"
+  # A pre-existing User Wiki must be valid; incomplete roots stay read-only.
+  printf '%s\n' '# User Wiki' >"$test_home/wiki/_index.md"
   cat >"$fake" <<'EOF'
 #!/bin/sh
 mode=ok
@@ -489,7 +527,7 @@ EOF
   transcript_result=$(MNEMOSYNE_CLI="$fake" CODEX_SESSION_ID=transcript \
     "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/wiki_ambient.py" capture --cwd "$workspace" --scope personal \
       --outcome "$transcript")
-  printf '%s' "$transcript_result" | grep -q '"status": "abstained"'
+  printf '%s' "$transcript_result" | python3 -c 'import json,sys; assert json.load(sys.stdin)["adapter"]["status"] == "abstained"'
   test ! -s "$log"
 
   invalid_result=$(MNEMOSYNE_CLI="$test_root/fake-mnemosyne-invalid" CODEX_SESSION_ID=invalid \
@@ -527,15 +565,45 @@ canonical_uri: "wiki://user/capture/user/user-architecture"
 
 The user architecture decision records a reusable bounded retrieval pattern.
 EOF
+  mkdir -p "$workspace/.wiki/output"
+  cat >"$workspace/.wiki/output/retrieval-plan.md" <<'EOF'
+# Bounded retrieval rollout plan
+
+Task artifact for validating bounded retrieval in the workspace.
+EOF
+  mkdir -p "$workspace/.wiki/inbox/autosave"
+  cat >"$workspace/.wiki/inbox/autosave/session-retrieval.md" <<'EOF'
+---
+status: pending-curation
+---
+
+## Outcome
+
+Bounded retrieval decision from a previous task remains pending curation.
+EOF
+  cat >"$workspace/.wiki/inbox/autosave/session-unrelated.md" <<'EOF'
+---
+status: pending-curation
+---
+
+## Outcome
+
+Unrelated horticulture discussion remains pending curation.
+EOF
 
   simple=$(MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/wiki_ambient.py" retrieve \
     --cwd "$workspace" --prompt 'What is two plus two?')
-  printf '%s' "$simple" | grep -q '"status": "abstained"'
+  printf '%s' "$simple" | grep -q '"status": "checked-no-match"'
   ! printf '%s' "$simple" | grep -q 'Workspace architecture'
+
+  # A topical prompt retrieves Wiki content without an intent signal.
+  direct=$(MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/wiki_ambient.py" retrieve \
+    --cwd "$workspace" --prompt 'bounded retrieval')
+  printf '%s' "$direct" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["status"] == "checked-with-results", data; assert data["intent"]["signals"] == [], data["intent"]; assert data["results"][0]["source"] == "workspace", data["results"]; assert data["task_artifacts"][0]["kind"] == "task-artifact", data["task_artifacts"]; assert data["task_artifacts"][0]["path"] == "output/retrieval-plan.md", data["task_artifacts"]; assert [item["path"] for item in data["pending_captures"]] == ["inbox/autosave/session-retrieval.md"], data["pending_captures"]' || exit 1
 
   historical=$(MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/wiki_ambient.py" retrieve \
     --cwd "$workspace" --prompt 'Continue the architecture decision for bounded retrieval' --limit 3 --max-bytes 3000)
-  printf '%s' "$historical" | python3 -c 'import json,sys; data=json.load(sys.stdin); sources=[item["source"] for item in data["results"]]; assert sources[:3] == ["workspace", "user", "mnemosyne"]; assert len(json.dumps(data["results"]).encode()) <= 3000' || exit 1
+  printf '%s' "$historical" | python3 -c 'import json,sys; data=json.load(sys.stdin); sources=[item["source"] for item in data["results"]]; assert sources[:3] == ["workspace", "user", "mnemosyne"], data["results"]; assert len(json.dumps(data["results"]).encode()) <= 3000, len(json.dumps(data["results"]).encode())' || exit 1
 
   cat >"$workspace/.wiki/raw/uncurated.md" <<'EOF'
 ---
@@ -553,17 +621,72 @@ EOF
 
   simple_context=$(printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","prompt":"What is two plus two?"}' | \
     MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
+  printf '%s' "$simple_context" | grep -q 'Wiki check: checked-no-match'
   ! printf '%s' "$simple_context" | grep -q 'Workspace architecture'
   historical_context=$(printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","prompt":"Continue the architecture decision for bounded retrieval"}' | \
     MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
   printf '%s' "$historical_context" | grep -q 'Workspace architecture'
   printf '%s' "$historical_context" | grep -q 'Private continuity hint'
 
+  first_turn=$(printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"continuity","turn_id":"one","prompt":"bounded retrieval"}' | \
+    MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
+  printf '%s' "$first_turn" | grep -q 'Workspace architecture' || return 1
+  printf '%s' "$first_turn" | grep -q 'task artifact; not canonical' || return 1
+  printf '%s' "$first_turn" | grep -q 'pending capture; not canonical; scope=workspace' || return 1
+  ! printf '%s' "$first_turn" | grep -q 'Unrelated horticulture' || return 1
+  followup_turn=$(printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"continuity","turn_id":"two","prompt":"Ya, setuju"}' | \
+    MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
+  printf '%s' "$followup_turn" | grep -q 'Workspace architecture' || return 1
+  printf '%s' "$followup_turn" | grep -q 'Wiki check: checked-with-results' || return 1
+  deictic_topic=$(printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"continuity","turn_id":"deictic","prompt":"Apa itu Kubernetes?"}' | \
+    MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
+  ! printf '%s' "$deictic_topic" | grep -q 'Workspace architecture' || return 1
+  pivot_turn=$(printf '%s' '{"cwd":"'"$workspace"'","hook_event_name":"UserPromptSubmit","session_id":"continuity","turn_id":"three","prompt":"quantum thermodynamics"}' | \
+    MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
+  ! printf '%s' "$pivot_turn" | grep -q 'Workspace architecture' || return 1
+  python3 - "$workspace/.wiki/.sessions/wiki-agent-system/retrieval" <<'PY' || return 1
+import json
+import sys
+from pathlib import Path
+
+records = list(Path(sys.argv[1]).glob("*.json"))
+assert len(records) == 1
+ledger = json.loads(records[0].read_text())
+assert ledger["schema_version"] == 4
+assert len(ledger["sessions"]) == 1
+session = next(iter(ledger["sessions"].values()))
+assert "query" not in session
+assert session["refs"] == []
+assert [event["status"] for event in session["events"]] == ["checked-with-results", "checked-with-results", "checked-no-match", "checked-no-match"]
+assert all(len(event["refs"]) <= 5 and "latency_ms" in event for event in session["events"])
+assert "Ya, setuju" not in records[0].read_text()
+assert "quantum thermodynamics" not in records[0].read_text()
+PY
+
+  foreign="$test_root/foreign-wiki"
+  mkdir -p "$foreign/.wiki"
+  printf '%s\n' '# Owned by another tool' >"$foreign/.wiki/_index.md"
+  foreign_context=$(printf '%s' '{"cwd":"'"$foreign"'","hook_event_name":"UserPromptSubmit","prompt":"bounded retrieval"}' | \
+    MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
+  printf '%s' "$foreign_context" | grep -q 'Wiki check: partial' || return 1
+  printf '%s' "$foreign_context" | grep -q 'User architecture' || return 1
+  test ! -e "$foreign/.wiki/.sessions" || return 1
+  symlink_workspace="$test_root/symlink-wiki"
+  mkdir -p "$symlink_workspace" "$test_root/foreign-target/raw" "$test_root/foreign-target/wiki"
+  printf '%s\n' '# Foreign target' >"$test_root/foreign-target/config.md"
+  printf '%s\n' '# Foreign target' >"$test_root/foreign-target/_index.md"
+  ln -s "$test_root/foreign-target" "$symlink_workspace/.wiki"
+  symlink_context=$(printf '%s' '{"cwd":"'"$symlink_workspace"'","hook_event_name":"UserPromptSubmit","prompt":"bounded retrieval"}' | \
+    MNEMOSYNE_CLI="$fake" "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
+  printf '%s' "$symlink_context" | grep -q 'Wiki check: partial' || return 1
+  printf '%s' "$symlink_context" | grep -q 'User architecture' || return 1
+  test ! -e "$test_root/foreign-target/.sessions" || return 1
+
   timed_out=$(MNEMOSYNE_CLI="$test_root/fake-mnemosyne-recall-timeout" \
     "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/scripts/wiki_ambient.py" retrieve --cwd "$workspace" \
       --prompt 'Investigate historical banana topic' --timeout 0.1)
   printf '%s' "$timed_out" | grep -q '"status": "timeout"'
-  printf '%s' "$timed_out" | grep -q '"status": "no-result"'
+  printf '%s' "$timed_out" | grep -q '"status": "checked-no-match"'
 )
 
 capture_contract() (
@@ -840,6 +963,11 @@ PY
 
 from_root() (
   cd "$root" || exit 1
+  if [ "${WIKI_P1_TRACE:-0}" = 1 ] && [ "${1:-}" = sh ]; then
+    shift
+    sh -x "$@"
+    exit $?
+  fi
   "$@"
 )
 
@@ -848,7 +976,7 @@ launcher_only_runtime() {
   pattern="$pattern(/hooks/|/scripts/).*"
   pattern="$pattern\\.py"
   ! rg -n --hidden --glob '!**/.git/**' "$pattern" \
-    "$root/README.md" "$root/plugins" "$root/tests"
+    "$root/README.md" "$root/plugins"
 }
 
 release_integrity() (
@@ -876,7 +1004,7 @@ check 'ambient configuration schema' "$root/plugins/wiki-preflight/hooks/launche
 check 'user-scope configuration survives plugin replacement' sh "$root/tests/config-persistence.sh" "$root/plugins/wiki-preflight"
 check 'user-scope configuration migration' sh "$root/tests/config-migration.sh" "$root/plugins/wiki-preflight"
 check 'agent-side semantic finalizer contract' sh "$root/tests/semantic-finalizer.sh" "$root/plugins/wiki-preflight"
-check 'Codex Stop hook contract fixture' sh "$root/tests/codex-stop-continuation.sh"
+check 'Codex real UserPromptSubmit retrieval and Stop continuation' sh "$root/tests/codex-stop-continuation.sh"
 check 'per-task semantic capture deduplication' sh "$root/tests/capture-dedup.sh" "$root/plugins/wiki-preflight"
 check 'quota report and operational-data quarantine' sh "$root/tests/quota-retention.sh" "$root/plugins/wiki-preflight"
 check 'scheduled, locked, fail-open retention' scheduled_retention
@@ -893,6 +1021,7 @@ check 'privacy, collaboration, and Git boundaries' privacy_and_boundaries
 check 'migration/version marker' migration_marker
 check 'user configuration future-schema protection' config_forward_migration
 check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-preflight"
+check 'universal retrieval, scope, continuity, privacy, context, and bilingual golden set' sh "$root/tests/universal-preflight.sh" "$root/plugins/wiki-preflight"
 check 'autonomous evidence verification' from_root sh tests/evidence-verification.sh
 check 'canonical evidence compatibility and migration' from_root env LLM_WIKI_BIN="${LLM_WIKI_BIN:-}" sh tests/canonical-evidence.sh
 check 'source integrity and release gate' release_integrity
@@ -901,7 +1030,7 @@ check 'vendored runtime integrity tamper regression' from_root sh tests/vendor-r
 check 'installed-package smoke test' from_root sh tests/installed-package.sh
 check 'YouTube caption fallback' from_root sh tests/youtube-fallback.sh
 check 'YouTube transcript API adapter' from_root sh tests/youtube-transcript-api.sh
-check 'live coexistence test' from_root sh tests/live-coexistence.sh
+check 'live coexistence test' env WIKI_MARKETPLACE_SOURCE="$root" WIKI_MARKETPLACE_REF= sh "$root/tests/live-coexistence.sh"
 check 'Git marketplace clean-device test' env WIKI_MARKETPLACE_SOURCE="$root" WIKI_MARKETPLACE_REF= sh "$root/tests/git-marketplace-clean-device.sh"
 check 'launcher-only plugin runtime' launcher_only_runtime
 
