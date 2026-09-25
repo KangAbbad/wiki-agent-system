@@ -403,14 +403,31 @@ PY
 compact=$(send SessionStart "$repo" '{"session_id":"continuity","source":"compact"}')
 printf '%s' "$compact" | grep -q 'continuity=reused'
 printf '%s' "$compact" | grep -q 'fresh-after-compaction'
+compact_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id":"resume-seed","tool_name":"Bash","tool_input":{"command":"true"}}')
+! printf '%s' "$compact_pretool" | grep -q 'permissionDecision": "deny"'
 subagent=$(send SubagentStart "$repo" '{"session_id":"continuity","turn_id":"three","agent_id":"agent-1","agent_type":"worker"}')
 printf '%s' "$subagent" | grep -q 'continuity=reused'
 printf '%s' "$subagent" | grep -q 'fresh-after-compaction'
+subagent_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id":"three","tool_name":"Bash","tool_input":{"command":"true"}}')
+! printf '%s' "$subagent_pretool" | grep -q 'permissionDecision": "deny"'
+continuation_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id":"continued-turn","tool_name":"Bash","tool_input":{"command":"true"}}')
+printf '%s' "$continuation_pretool" | grep -q 'permissionDecision": "deny"'
+missing_turn_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","tool_name":"Bash","tool_input":{"command":"true"}}')
+printf '%s' "$missing_turn_pretool" | grep -q 'permissionDecision": "deny"'
+other_repo="$HOME/Documents/other-preflight-root"
+mkdir -p "$other_repo"
+send SessionStart "$other_repo" >/dev/null
+cross_scope_pretool=$(send PreToolUse "$other_repo" '{"session_id":"continuity","turn_id":"continued-turn","tool_name":"Bash","tool_input":{"command":"true"}}')
+printf '%s' "$cross_scope_pretool" | grep -q 'permissionDecision": "deny"'
 
 # A topic pivot replaces the prior descriptor; a different session cannot inherit it.
 pivot=$(send UserPromptSubmit "$repo" '{"session_id":"continuity","turn_id":"pivot","prompt":"Kubernetes cluster failover"}')
 printf '%s' "$pivot" | grep -q 'continuity=fresh-query'
 printf '%s' "$pivot" | grep -q 'Kubernetes cluster failover'
+pivot_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id":"pivot","tool_name":"Bash","tool_input":{"command":"true"}}')
+! printf '%s' "$pivot_pretool" | grep -q 'permissionDecision": "deny"'
+stale_compact_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id":"compact-continuation","tool_name":"Bash","tool_input":{"command":"true"}}')
+printf '%s' "$stale_compact_pretool" | grep -q 'permissionDecision": "deny"'
 pivot_followup=$(send UserPromptSubmit "$repo" '{"session_id":"continuity","turn_id":"pivot-followup","prompt":"Ya, setuju"}')
 printf '%s' "$pivot_followup" | grep -q 'continuity=reused'
 printf '%s' "$pivot_followup" | grep -q 'Kubernetes cluster failover'

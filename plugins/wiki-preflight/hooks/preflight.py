@@ -1215,13 +1215,13 @@ def current_turn_preflight_recorded(route, payload, workspace_allowed):
         status, ledger = read_retrieval_ledger(directory / "ledger.json")
         if status not in {"available", "created", "legacy-schema"} or not ledger:
             return False
-        turn_hash = hashlib.sha256(turn_id.strip().encode()).hexdigest()[:16]
         session = ledger["sessions"].get(session_key)
         if not isinstance(session, dict):
             return False
+        turn_hash = hashlib.sha256(turn_id.strip().encode()).hexdigest()[:16]
         allowed_statuses = {"checked-with-results", "checked-no-match", "partial", "unavailable"}
         return any(
-            event.get("hook_event") == "UserPromptSubmit"
+            event.get("hook_event") in {"UserPromptSubmit", "SubagentStart"}
             and event.get("turn_hash") == turn_hash
             and event.get("status") in allowed_statuses
             for event in session.get("events", [])

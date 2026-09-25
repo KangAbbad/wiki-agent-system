@@ -300,7 +300,14 @@ expect_rejected "$foreign_workspace" foreign-or-incomplete-wiki
 test ! -e "$foreign_workspace/.wiki/raw/articles"
 
 lint_bin=${LLM_WIKI_BIN:-}
-test -n "$lint_bin" && test -x "$lint_bin"
+if [ -z "$lint_bin" ]; then
+  printf '%s\n' 'LLM_WIKI_BIN is required for P1 canonical evidence lint; set it to the tested llm-wiki executable.' >&2
+  exit 2
+fi
+if [ ! -x "$lint_bin" ]; then
+  printf '%s\n' 'LLM_WIKI_BIN must point to an executable llm-wiki binary.' >&2
+  exit 2
+fi
 lint_workspace="$test_root/lint"
 mkdir -p "$lint_workspace/.wiki/raw/articles" "$lint_workspace/.wiki/raw/data" \
   "$lint_workspace/.wiki/raw/notes" "$lint_workspace/.wiki/raw/papers" "$lint_workspace/.wiki/raw/repos" \

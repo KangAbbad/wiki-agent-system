@@ -1,7 +1,10 @@
 # P1 acceptance gate
 
-Run `sh tests/p1-acceptance.sh` from a clean checkout. It prints one result
-per control and ends with exactly `P1 ACCEPTANCE: PASS` or `P1 ACCEPTANCE: FAIL`.
+Run `LLM_WIKI_BIN=/absolute/path/to/llm-wiki sh tests/p1-acceptance.sh` from a
+clean checkout. `LLM_WIKI_BIN` must name an executable tested CLI; missing or
+invalid configuration fails the canonical evidence control. The gate prints
+one result per control and ends with exactly `P1 ACCEPTANCE: PASS` or
+`P1 ACCEPTANCE: FAIL`.
 
 The gate requires all controls below:
 
@@ -16,8 +19,8 @@ The gate requires all controls below:
 - canonical evidence writers emit `raw/articles` records, and the explicit
   migration path preserves eligible legacy evidence without touching ordinary
   raw records or private runtime state;
-- `tests/canonical-evidence.sh` runs a read-only LLM Wiki lint fixture when
-  `LLM_WIKI_BIN` points to the tested `llm-wiki` binary; it requires zero
+- `tests/canonical-evidence.sh` runs a read-only LLM Wiki lint fixture using
+  `LLM_WIKI_BIN`; it requires zero
   critical, warning, or suggestion findings and never invokes `--fix`;
 - public web extraction preserves URL, retrieval method/time, hash, provenance,
   and an explicit evidence lifecycle without upgrading it to caption evidence;
