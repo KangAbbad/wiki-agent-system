@@ -40,7 +40,8 @@ printf '%s' "$stop" | "$preflight_launcher" "$preflight" >"$root/preflight-stop-
 printf '%s' "$stop" | python3 "$upstream" hook --harness codex --if-enabled >"$root/upstream-stop.json"
 
 grep -q 'Wiki Preflight owns scoped knowledge retrieval' "$root/preflight-start.json" || fail "wiki-preflight omitted its bounded startup capsule"
-! grep -q '_index.md' "$root/preflight-start.json" || fail "wiki-preflight dumped the full Wiki index"
+# The generated index contains this body link; a capsule may mention its path.
+! grep -Fq 'Raw](raw/)' "$root/preflight-start.json" || fail "wiki-preflight dumped the full Wiki index"
 ! grep -q 'additionalContext' "$root/upstream-start.json" || fail "upstream hook added duplicate digest context after default ownership setup"
 python3 - "$HOME/wiki/.sessions/config.json" <<'PY'
 import json

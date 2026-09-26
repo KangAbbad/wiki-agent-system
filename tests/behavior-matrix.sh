@@ -19,6 +19,12 @@ run_hook() {
   printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"$event\"}" | "$launcher" "$hook"
 }
 
+contains_text() {
+  file=$1
+  expected=$2
+  awk '{ $1=$1; printf "%s%s", separator, $0; separator=" " }' "$file" | grep -Fq "$expected"
+}
+
 # Projectless/home work initializes only the User Wiki, never HOME/.wiki.
 printf '%s' "{\"cwd\":\"$HOME\",\"hook_event_name\":\"SessionStart\"}" | "$launcher" "$hook" >"$test_root/home-start.json"
 test -f "$HOME/wiki/_index.md"
@@ -62,21 +68,32 @@ test "$(find "$casual/.wiki/inbox" -type f -name 'session-*.md' | wc -l | tr -d 
 
 # Docs routing is content policy, not a folder-name heuristic.
 policy="$test_root/plugin/defaults/policy.md"
-grep -q 'knowledge artifacts default to Wiki `output/`' "$policy"
-grep -q 'explicit product/developer documentation' "$policy"
-grep -q 'Public vendor, database' "$policy"
-grep -q 'Evidence lifecycle' "$policy"
-grep -q 'knowledge_readiness=ready' "$policy"
-grep -q 'never run `llm-wiki lint --fix`' "$policy"
-grep -q 'routine user task' "$policy"
+contains_text "$policy" 'knowledge artifacts default to Wiki `output/`'
+contains_text "$policy" 'explicit product/developer documentation'
+contains_text "$policy" 'Wiki-owned internal plans go in `.wiki/output/`'
+contains_text "$policy" 'Update `.wiki/output/_index.md`'
+contains_text "$policy" 'root Markdown landing file linking to README'
+contains_text "$policy" 'Public vendor, database'
+contains_text "$policy" 'Evidence lifecycle'
+contains_text "$policy" 'knowledge_readiness=ready'
+contains_text "$policy" 'never run `llm-wiki lint --fix`'
+contains_text "$policy" 'routine user task'
 ! grep -q 'run.*semantic finalizer\|python3.*wiki_ambient.py' "$policy"
 
 # The marketplace package includes the global policy required for projectless
 # user-scope work; a device-local skill is not a dependency.
 ambient="$test_root/plugin/skills/wiki-ambient/SKILL.md"
 test -f "$ambient"
-grep -q 'projectless work' "$ambient"
-grep -q 'routine user verification' "$ambient"
+contains_text "$ambient" 'projectless work'
+contains_text "$ambient" 'routine user verification'
+contains_text "$ambient" 'internal-plan'
+contains_text "$ambient" 'placement rule overrides generic planning-skill folder defaults'
+
+workspace_skill="$test_root/plugin/skills/wiki-workspace/SKILL.md"
+contains_text "$workspace_skill" 'overrides generic planning-skill defaults'
+contains_text "$workspace_skill" 'update `.wiki/output/_index.md` in the same task'
+contains_text "$workspace_skill" 'root-level landing Markdown file'
+contains_text "$workspace_skill" 'rely on this loaded skill and the current preflight'
 
 # A public gap remains agent-owned; a real boundary gets one concrete note.
 gap_prompt=$(printf '%s' "{\"cwd\":\"$workspace\",\"hook_event_name\":\"UserPromptSubmit\",\"session_id\":\"boundary\",\"turn_id\":\"one\",\"prompt\":\"Verify production drop database docs https://example.test/spec\"}" | "$launcher" "$hook")

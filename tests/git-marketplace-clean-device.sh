@@ -68,7 +68,9 @@ test -f "$root/workspace/.wiki/.sessions/wiki-agent-system/marker.json" || fail 
 find "$root/workspace/.wiki/inbox/autosave" -type f -name '*.md' -print -quit | grep -q . || fail "installed Stop hook did not capture"
 grep -R -q 'Completed clean-device verification' "$root/workspace/.wiki/inbox/autosave" || fail "installed Stop hook omitted final result"
 grep -q 'Wiki Preflight owns scoped knowledge retrieval' "$root/start.json" || fail "installed hook did not emit the bounded startup capsule"
-! grep -q '_index.md' "$root/start.json" || fail "installed startup hook dumped the Wiki index"
+printf '\nWIKI_INDEX_CONTENT_SENTINEL_7d26f3c9\n' >>"$root/workspace/.wiki/_index.md"
+printf '{"cwd":"%s","hook_event_name":"SessionStart"}' "$root/workspace" | "$stable_launcher" "$stable_hook" >"$root/start-after-index.json"
+! grep -q 'WIKI_INDEX_CONTENT_SENTINEL_7d26f3c9' "$root/start-after-index.json" || fail "installed startup hook dumped Wiki index content"
 
 retention_workspace="$root/retention-workspace"
 mkdir -p "$retention_workspace/.wiki/raw" "$retention_workspace/.wiki/wiki" \

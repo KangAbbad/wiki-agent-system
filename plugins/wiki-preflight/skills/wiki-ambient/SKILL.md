@@ -7,7 +7,8 @@ description: Route ordinary Codex work through LLM Wiki when prior knowledge, so
 
 Use the global LLM Wiki without requiring `@wiki`. This is the distributed
 policy for user-scope and projectless work. For repository work, apply the
-companion `wiki-workspace` skill and its lifecycle hooks.
+companion `wiki-workspace` skill and its lifecycle hooks; its internal-plan
+placement rule overrides generic planning-skill folder defaults.
 
 ## Route
 

@@ -4,6 +4,19 @@ set -u
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 source_codex_home=${CODEX_HOME:-${HOME}/.codex}
+llm_wiki_bin=${LLM_WIKI_BIN:-}
+if [ -z "$llm_wiki_bin" ]; then
+  llm_wiki_bin=$(command -v llm-wiki 2>/dev/null || true)
+fi
+if [ -z "$llm_wiki_bin" ] && [ -d "$source_codex_home/plugins/cache/llm-wiki" ]; then
+  llm_wiki_bin=$(find "$source_codex_home/plugins/cache/llm-wiki" -type f -path '*/bin/llm-wiki' -perm -111 -print -quit 2>/dev/null || true)
+fi
+if [ -z "$llm_wiki_bin" ] || [ ! -x "$llm_wiki_bin" ]; then
+  printf '%s\n' 'P1 acceptance requires an executable llm-wiki binary. Set LLM_WIKI_BIN, put llm-wiki on PATH, or install it under CODEX_HOME.' >&2
+  exit 2
+fi
+LLM_WIKI_BIN=$llm_wiki_bin
+export LLM_WIKI_BIN
 test_environment=$(mktemp -d)
 trap 'rm -rf "$test_environment"' EXIT
 export HOME="$test_environment/home" XDG_CONFIG_HOME="$test_environment/config" CODEX_HOME="$test_environment/codex"
@@ -1023,7 +1036,7 @@ check 'user configuration future-schema protection' config_forward_migration
 check 'behavior matrix' sh "$root/tests/behavior-matrix.sh" "$root/plugins/wiki-preflight"
 check 'universal retrieval, scope, continuity, privacy, context, and bilingual golden set' sh "$root/tests/universal-preflight.sh" "$root/plugins/wiki-preflight"
 check 'autonomous evidence verification' from_root sh tests/evidence-verification.sh
-check 'canonical evidence compatibility and migration' from_root env LLM_WIKI_BIN="${LLM_WIKI_BIN:-}" sh tests/canonical-evidence.sh
+check 'canonical evidence compatibility and migration' from_root sh tests/canonical-evidence.sh
 check 'source integrity and release gate' release_integrity
 check 'source clean-device smoke test' from_root sh tests/clean-device.sh
 check 'vendored runtime integrity tamper regression' from_root sh tests/vendor-runtime-integrity.sh
