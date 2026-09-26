@@ -198,8 +198,10 @@ printf '%s' "$workspace_capture_followup" | grep -q '\[workspace\] Auto-saved wo
 printf '%s' "$workspace_capture_followup" | grep -q 'quasar packet lease renewal'
 pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id":"one","tool_name":"apply_patch","tool_input":{"command":"*** Begin Patch"}}')
 ! printf '%s' "$pretool" | grep -q 'permissionDecision.*deny'
-pretool_missing=$(send PreToolUse "$repo" '{"session_id":"no-preflight","turn_id":"one","tool_name":"Bash","tool_input":{"command":"touch forbidden"}}')
+pretool_missing=$(send PreToolUse "$repo" '{"session_id":"diagnostic-private-session","turn_id":"diagnostic-private-turn","tool_name":"Bash","tool_input":{"command":"echo diagnostic-private-command"}}')
 printf '%s' "$pretool_missing" | grep -q 'permissionDecision.*deny'
+printf '%s' "$pretool_missing" | grep -q 'reason=session_record_missing'
+! printf '%s' "$pretool_missing" | grep -q 'diagnostic-private'
 followup=$(send UserPromptSubmit "$repo" '{"session_id":"continuity","turn_id":"two","prompt":"Ya, setuju"}')
 printf '%s' "$followup" | grep -q 'continuity=reused'
 printf '%s' "$followup" | grep -q 'CQRS decision version live'
@@ -412,8 +414,10 @@ subagent_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id"
 ! printf '%s' "$subagent_pretool" | grep -q 'permissionDecision": "deny"'
 continuation_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","turn_id":"continued-turn","tool_name":"Bash","tool_input":{"command":"true"}}')
 printf '%s' "$continuation_pretool" | grep -q 'permissionDecision": "deny"'
+printf '%s' "$continuation_pretool" | grep -q 'reason=turn_record_missing'
 missing_turn_pretool=$(send PreToolUse "$repo" '{"session_id":"continuity","tool_name":"Bash","tool_input":{"command":"true"}}')
 printf '%s' "$missing_turn_pretool" | grep -q 'permissionDecision": "deny"'
+printf '%s' "$missing_turn_pretool" | grep -q 'reason=turn_id_missing'
 other_repo="$HOME/Documents/other-preflight-root"
 mkdir -p "$other_repo"
 send SessionStart "$other_repo" >/dev/null

@@ -1199,35 +1199,46 @@ def private_retrieval_state_directory(route):
 def current_turn_preflight_recorded(route, payload, workspace_allowed):
     identity = task_identity(payload)
     turn_id = payload.get("turn_id") if isinstance(payload, dict) else None
-    if not identity or not isinstance(turn_id, str) or not turn_id.strip():
-        return False
+    if not identity:
+        return False, "identity_missing"
+    if not isinstance(turn_id, str) or not turn_id.strip():
+        return False, "turn_id_missing"
     try:
         directory = retrieval_state_directory(route, workspace_allowed)
         if directory is None:
-            return False
+            return False, "wiki_unavailable"
         if route.get("scope") == "workspace":
             root = route.get("local_wiki") or route.get("workspace_root") or route.get("cwd")
         else:
             root = route.get("user_wiki")
         if not isinstance(root, str) or not root:
-            return False
+            return False, "root_unavailable"
         session_key = hashlib.sha256(f"{route['scope']}:{Path(root).resolve()}:{identity}".encode()).hexdigest()[:32]
         status, ledger = read_retrieval_ledger(directory / "ledger.json")
+        if status == "future-schema":
+            return False, "ledger_future_schema"
         if status not in {"available", "created", "legacy-schema"} or not ledger:
-            return False
+            return False, "ledger_invalid"
         session = ledger["sessions"].get(session_key)
         if not isinstance(session, dict):
-            return False
+            return False, "session_record_missing"
         turn_hash = hashlib.sha256(turn_id.strip().encode()).hexdigest()[:16]
         allowed_statuses = {"checked-with-results", "checked-no-match", "partial", "unavailable"}
-        return any(
-            event.get("hook_event") in {"UserPromptSubmit", "SubagentStart"}
+        matching_events = [
+            event for event in session.get("events", [])
+            if event.get("hook_event") in {"UserPromptSubmit", "SubagentStart"}
             and event.get("turn_hash") == turn_hash
-            and event.get("status") in allowed_statuses
-            for event in session.get("events", [])
-        )
+        ]
+        if not matching_events:
+            return False, "turn_record_missing"
+        if not any(
+            event.get("status") in allowed_statuses
+            for event in matching_events
+        ):
+            return False, "status_not_accepted"
+        return True, "preflight_recorded"
     except (OSError, QueueError, TypeError, ValueError):
-        return False
+        return False, "state_unavailable"
 
 
 def configure_llm_wiki_context_owner(user_wiki):
@@ -1914,14 +1925,16 @@ def main():
             ensure_sessions_ignored(root, workspace)
 
     if event == "PreToolUse":
-        if payload.get("tool_name") in {"Bash", "apply_patch"} and not current_turn_preflight_recorded(route, payload, workspace_allowed):
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "Wiki preflight has no recorded status for this turn; no local command or patch was run.",
-                }
-            }))
+        if payload.get("tool_name") in {"Bash", "apply_patch"}:
+            recorded, reason = current_turn_preflight_recorded(route, payload, workspace_allowed)
+            if not recorded:
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": f"Wiki preflight has no recorded status for this turn (reason={reason}); no local command or patch was run.",
+                    }
+                }))
         return
 
     if route.get("user_wiki_status") == "valid" and event in {"SessionStart", "UserPromptSubmit", "SubagentStart"}:
