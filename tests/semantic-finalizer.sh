@@ -10,7 +10,11 @@ export MNEMOSYNE_CLI="$test_root/mnemosyne-not-installed" TMPDIR="$test_root/tmp
 mkdir -p "$HOME" "$TMPDIR"
 
 run_hook() {
-  printf '%s' "$2" | "$plugin_root/hooks/launcher.sh" "$plugin_root/hooks/preflight.py"
+  hook_result=$(printf '%s' "$2" | "$plugin_root/hooks/launcher.sh" "$plugin_root/hooks/preflight.py")
+  if [ "$1" = Stop ]; then
+    printf '%s' "$hook_result" | python3 -c 'import json,sys; assert json.load(sys.stdin) == {"continue": True}'
+  fi
+  printf '%s\n' "$hook_result"
 }
 
 context_workspace="$test_root/context"
@@ -54,13 +58,16 @@ assert data["prompt_intent"]["matched"] is True
 assert "prompt" not in data
 PY
 stop=$(run_hook Stop "{\"cwd\":\"$durable\",\"hook_event_name\":\"Stop\",\"session_id\":\"durable\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed migration with token=hidden\"}")
-printf '%s\n' "$stop" | grep -Fq '"hookEventName": "Stop"'
+printf '%s\n' "$stop" | python3 -c 'import json,sys; assert json.load(sys.stdin) == {"continue": True}'
 ! printf '%s\n' "$stop" | grep -Fq '"decision": "block"'
 capture=$(find "$durable/.wiki/inbox/autosave" -type f -name 'session-*.md')
 test "$(find "$durable/.wiki/inbox/autosave" -type f -name 'session-*.md' | wc -l | tr -d ' ')" -eq 1
 grep -Fq 'Completed migration with token= [REDACTED]' "$capture"
 ! grep -Fq 'token=hidden' "$capture"
 test ! -e "$state"
+capture_before=$(cksum "$capture")
+run_hook Stop "{\"cwd\":\"$durable\",\"hook_event_name\":\"Stop\",\"session_id\":\"durable\",\"turn_id\":\"one\",\"last_assistant_message\":\"Repeated completion\"}" >/dev/null
+test "$(cksum "$capture")" = "$capture_before"
 
 casual="$test_root/casual"
 mkdir "$casual"
@@ -295,6 +302,24 @@ module.advance_foreground_controller(
     wiki, wiki.parent, "", {"session_id": "expired-controller", "turn_id": "turn"},
 )
 assert module.read_foreground_controller(wiki, expired_id)[1]["state"] == "exhausted"
+
+# A capture write failure must still return a valid non-blocking Stop response.
+from unittest.mock import patch
+
+failure_payload = {
+    "cwd": str(wiki.parent), "hook_event_name": "Stop",
+    "session_id": "capture-write-failure", "turn_id": "one",
+    "last_assistant_message": "Completed the migration decision",
+}
+module.write_finalizer_state(wiki, failure_payload, "Synthesize the migration decision")
+before_captures = sorted(wiki.glob("inbox/autosave/session-*.md"))
+output = io.StringIO()
+with patch.object(module, "capture", side_effect=OSError("synthetic write failure")) as failing_capture:
+    with patch.object(sys, "stdin", io.StringIO(json.dumps(failure_payload))), contextlib.redirect_stdout(output):
+        module.main()
+    failing_capture.assert_called_once()
+assert json.loads(output.getvalue()) == {"continue": True}
+assert sorted(wiki.glob("inbox/autosave/session-*.md")) == before_captures
 PY
 
 echo 'semantic finalizer contract passed'

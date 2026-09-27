@@ -32,7 +32,7 @@
           },
           {
             "type": "command",
-            "command": "\"$WIKI_PLUGIN_ROOT/hooks/launcher.sh\" \"$WIKI_PLUGIN_ROOT/hooks/preflight.py\"",
+            "command": "\"$WIKI_PLUGIN_ROOT/hooks/launcher.sh\" \"$WIKI_PLUGIN_ROOT/hooks/preflight.py\" | tee \"$CODEX_FIXTURE_STOP_OUTPUT\"",
             "timeout": 5
           }
         ]

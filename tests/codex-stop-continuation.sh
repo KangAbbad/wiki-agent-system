@@ -45,6 +45,7 @@ if ! CODEX_HOME="$test_root/codex-home" \
   WIKI_PLUGIN_ROOT="$root/plugins/wiki-preflight" \
   WIKI_FIXTURE_HOOK="$workspace/.codex/stop_fixture.py" \
   CODEX_FIXTURE_USER_PROMPT_CONTEXT="$test_root/user-prompt-context.json" \
+  CODEX_FIXTURE_STOP_OUTPUT="$test_root/production-stop.json" \
   CODEX_FIXTURE_STATE="$state" \
   codex exec --ephemeral --json --dangerously-bypass-hook-trust \
     --skip-git-repo-check -C "$workspace" \
@@ -53,10 +54,15 @@ if ! CODEX_HOME="$test_root/codex-home" \
   exit 1
 fi
 
-python3 - "$state" "$output" <<'PY'
+python3 - "$state" "$output" "$test_root/codex-stderr" "$test_root/production-stop.json" <<'PY'
 import json
 import sys
 from pathlib import Path
+
+assert json.loads(Path(sys.argv[4]).read_text()) == {"continue": True}
+for path in (sys.argv[2], sys.argv[3]):
+    text = Path(path).read_text().lower()
+    assert "invalid stop hook json output" not in text, "Codex rejected the production Stop response"
 
 state = json.loads(Path(sys.argv[1]).read_text())
 assert state["stop_count"] == 2, state

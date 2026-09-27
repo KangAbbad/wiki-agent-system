@@ -1841,6 +1841,10 @@ def hook_context(policy, retrieval=None, youtube="", public=""):
 
 
 def emit_hook_context(event, text):
+    if event == "Stop":
+        # Stop accepts common output fields, not a context-event envelope.
+        print(json.dumps({"continue": True}))
+        return
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}, ensure_ascii=False))
 
 

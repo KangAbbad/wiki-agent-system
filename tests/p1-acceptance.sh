@@ -825,7 +825,7 @@ scope_routing() (
   printf '%s\n' changed >"$fallback_workspace/changed.txt"
   stop_result=$(printf '%s' "{\"cwd\":\"$fallback_workspace\",\"hook_event_name\":\"Stop\",\"session_id\":\"fallback\",\"turn_id\":\"one\",\"last_assistant_message\":\"Completed fallback\"}" | \
     "$test_root/plugin/hooks/launcher.sh" "$test_root/plugin/hooks/preflight.py")
-  printf '%s' "$stop_result" | grep -q '"hookEventName": "Stop"'
+  printf '%s' "$stop_result" | python3 -c 'import json,sys; assert json.load(sys.stdin) == {"continue": True}'
   fallback_capture=$(find "$fallback_workspace/.wiki/inbox/autosave" -name 'session-*.md')
   test -n "$fallback_capture"
   grep -q '^scope: workspace$' "$fallback_capture"

@@ -74,7 +74,7 @@ grep -q '^knowledge_readiness: ready$' "$stable_raw"
 durable_payload=$(printf '{"cwd":"%s","hook_event_name":"UserPromptSubmit","session_id":"stable-durable","turn_id":"one","prompt":"Synthesize the cache-free runtime result"}' "$workspace")
 printf '%s' "$durable_payload" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >/dev/null
 printf '{"cwd":"%s","hook_event_name":"Stop","session_id":"stable-durable","turn_id":"one","last_assistant_message":"Cache-free durable capture"}' "$workspace" | PLUGIN_ROOT="$test_root/missing-plugin" PLUGIN_DATA="$data_root" HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" "$data_root/current/hooks/launcher.sh" "$data_root/current/hooks/preflight.py" >"$test_root/durable-stop.json"
-grep -q '"hookEventName": "Stop"' "$test_root/durable-stop.json"
+python3 -c 'import json,sys; assert json.load(open(sys.argv[1])) == {"continue": True}' "$test_root/durable-stop.json"
 grep -R -q 'Cache-free durable capture' "$workspace/.wiki/inbox/autosave"
 
 capture_output=$(HOME="$test_root/home" XDG_CONFIG_HOME="$test_root/config" CODEX_SESSION_ID=cache-removed "$data_root/current/hooks/launcher.sh" "$data_root/current/scripts/wiki_ambient.py" capture \

@@ -1,6 +1,6 @@
 {
   "name": "wiki-preflight",
-  "version": "0.13.3",
+  "version": "0.13.4",
   "description": "Loads relevant Workspace and User Wiki knowledge before Codex work.",
   "author": {
     "name": "kangabbad"
