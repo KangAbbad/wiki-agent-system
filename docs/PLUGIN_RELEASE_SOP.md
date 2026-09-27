@@ -63,8 +63,10 @@ next hook event after atomic provisioning.
 
 ## 5. Mandatory cache cleanup
 
-Only clean caches after steps 2–4 succeed, the required activation boundary is
-met, and no active task is using the old runtime.
+For routine version-pruning after a successful release, clean caches only
+after steps 2–4 succeed, the required activation boundary is met, and no
+active task is using the old runtime. Failed-validation recovery follows the
+separate procedure below.
 
 1. Verify the new installed cache version and the stable runtime target match.
 2. Retain the current stable runtime and one immediately previous runtime for
@@ -91,6 +93,28 @@ If a cache is suspected corrupt rather than merely superseded, use a clean
 reinstall after quitting Codex: remove the plugin through Codex plugin
 management, then install `wiki-preflight@wiki-agent-system` again. Reopen
 Codex and complete the post-install validation below before resuming work.
+
+### Failed-validation recovery: cleanup, then retry the identical prompt
+
+For Wiki Preflight validation, treat the relevant plugin cache as the required
+first recovery target whenever a check fails. This is an operational
+troubleshooting rule, not proof that cache caused every failure.
+
+1. Keep the same Codex task open and preserve the exact validation prompt. Do
+   not rewrite it, switch sessions, or create a replacement task.
+2. Clean only the affected stale/superseded plugin cache and the dedicated
+   Python bytecode cache listed above. Preserve the active installed package,
+   `$PLUGIN_DATA/current`, and the current plus immediately previous stable
+   runtimes. If the active package itself appears corrupt, refresh/reinstall
+   that exact plugin through Codex plugin management; never delete its active
+   directory by hand.
+3. Retry validation in the same task using the byte-for-byte identical prompt.
+   This retry is mandatory after the targeted cleanup.
+4. If the retry fails, stop and report both attempts, their errors, and the
+   cache cleanup performed. Do not loop indefinitely or claim cache was the
+   proven root cause without evidence. If Codex requires a restart before the
+   active package can be refreshed, report the same-session retry as blocked;
+   do not silently switch to a new session and call it a pass.
 
 ## 6. Post-install validation
 
